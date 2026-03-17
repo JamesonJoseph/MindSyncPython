@@ -28,7 +28,7 @@ The application integrates multiple everyday tools such as **journaling, task ma
 ### 📸 Facial Emotion Detection
 - Users can take a **selfie check-in**
 - AI detects facial emotions (happy, sad, neutral, etc.)
-- Provides mental wellness feedback
+- Provides mental wellness feedback.
 
 ---
 
