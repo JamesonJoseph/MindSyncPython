@@ -140,10 +140,10 @@ The application may request the following permissions:
 
 ## 👨‍💻 Team Members
 
-- **Jameson Joseph**
-- **Harigovind R**
-- **Karthik Krishnan**
-- **Melbin K Thomas**
+- **[Jameson Joseph](https://github.com/JamesonJoseph)**
+- **[Harigovind R](https://github.com/harigovind101)**
+- **[Karthik Krishnan](https://github.com/iamkarthik2004)**
+- **[Melbin K Thomas](https://github.com/melbin55)**
 
 ---
 
