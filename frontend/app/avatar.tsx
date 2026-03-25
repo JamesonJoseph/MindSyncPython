@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -7,25 +7,40 @@ import {
   ScrollView,
   Alert,
   ActivityIndicator,
+  Dimensions,
 } from 'react-native';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
+import { useVideoPlayer, VideoView } from 'expo-video';
+import Animated, { useAnimatedStyle, withTiming, useSharedValue } from 'react-native-reanimated';
+import { activateKeepAwake, deactivateKeepAwake } from 'expo-keep-awake';
 
 import { useAudioRecorder, RecordingPresets, useAudioRecorderState, requestRecordingPermissionsAsync, setAudioModeAsync } from 'expo-audio';
 import * as Speech from 'expo-speech';
 import { auth } from '../firebaseConfig';
 import { getApiBaseUrl } from '../utils/api';
 
-type AvatarState = 'idle' | 'listening' | 'speaking';
+const { width: SCREEN_WIDTH } = Dimensions.get('window');
+const AVATAR_HEIGHT = 350;
+
+type AvatarState = 'idle' | 'listening' | 'thinking' | 'speaking_happy' | 'speaking_compassionate';
 
 interface VoiceAnalysis {
   transcript: string;
   emotion: string;
   confidence: number;
-  suggestions: string;
-  earlyWarning: string;
+  suggestions: string | string[];
+  earlyWarning: any;
 }
+
+const SOURCES = {
+  idle: require('../assets/avatar/Idle_Neutral.mp4'),
+  listening: require('../assets/avatar/Listening.mp4'),
+  thinking: require('../assets/avatar/Thinking.mp4'),
+  speaking_happy: require('../assets/avatar/Speaking_Happy.mp4'),
+  speaking_compassionate: require('../assets/avatar/Speaking_Compassionate.mp4'),
+};
 
 export default function AvatarScreen() {
   const router = useRouter();
@@ -38,672 +53,293 @@ export default function AvatarScreen() {
   const [aiResponse, setAiResponse] = useState<VoiceAnalysis | null>(null);
   const [showResponse, setShowResponse] = useState(false);
   const [micPermissionGranted, setMicPermissionGranted] = useState(false);
-  const [recordingUri, setRecordingUri] = useState<string | null>(null);
-  
-  const recordingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  
-  // Get avatar emoji based on state
-  const getAvatarEmoji = () => {
-    switch (avatarState) {
-      case 'listening':
-        return '👂';
-      case 'speaking':
-        return '🗣️';
-      default:
-        return '🤖';
-    }
-  };
 
+  // --- High-Efficiency 2-Layer System ---
+  // To avoid hardware decoder limits (which cause black screens), we only use 2 players.
+  // We alternate which player is active.
+  const [activeLayer, setActiveLayer] = useState<'A' | 'B'>('A');
+  const [sourceA, setSourceA] = useState(SOURCES.idle);
+  const [sourceB, setSourceB] = useState(SOURCES.idle);
+  
+  const playerA = useVideoPlayer(sourceA);
+  const playerB = useVideoPlayer(sourceB);
+
+  const opacityA = useSharedValue(1);
+  const opacityB = useSharedValue(0);
+
+  // Transition Logic
+  useEffect(() => {
+    const nextSource = SOURCES[avatarState];
+    
+    if (activeLayer === 'A') {
+      // Check if source actually changed
+      if (sourceA === nextSource) {
+        playerA.play();
+        return;
+      }
+      // Prepare B
+      setSourceB(nextSource);
+      setActiveLayer('B');
+      opacityB.value = withTiming(1, { duration: 500 });
+      opacityA.value = withTiming(0, { duration: 500 });
+      playerB.play();
+      // Pause A after transition
+      const t = setTimeout(() => playerA.pause(), 600);
+      return () => clearTimeout(t);
+    } else {
+      if (sourceB === nextSource) {
+        playerB.play();
+        return;
+      }
+      // Prepare A
+      setSourceA(nextSource);
+      setActiveLayer('A');
+      opacityA.value = withTiming(1, { duration: 500 });
+      opacityB.value = withTiming(0, { duration: 500 });
+      playerA.play();
+      // Pause B after transition
+      const t = setTimeout(() => playerB.pause(), 600);
+      return () => clearTimeout(t);
+    }
+  }, [avatarState]);
+
+  // Player Config
+  useEffect(() => {
+    [playerA, playerB].forEach(p => {
+      if (p) {
+        p.loop = true;
+        p.muted = true;
+      }
+    });
+    playerA.play();
+    activateKeepAwake();
+    return () => { deactivateKeepAwake(); };
+  }, [playerA, playerB]);
+
+  const animatedStyleA = useAnimatedStyle(() => ({
+    opacity: opacityA.value,
+    zIndex: activeLayer === 'A' ? 2 : 1,
+  }));
+
+  const animatedStyleB = useAnimatedStyle(() => ({
+    opacity: opacityB.value,
+    zIndex: activeLayer === 'B' ? 2 : 1,
+  }));
+
+  // --- Audio / Logic ---
   const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const recorderState = useAudioRecorderState(audioRecorder);
-  
   const userId = auth.currentUser?.uid || '';
   const userEmail = auth.currentUser?.email || '';
 
   useEffect(() => {
     checkMicrophonePermission();
-    return () => {
-      if (recordingTimerRef.current) {
-        clearInterval(recordingTimerRef.current);
-      }
-    };
+    return () => Speech.stop();
   }, []);
-
-  useEffect(() => {
-    if (recorderState?.isRecording) {
-      setRecordingUri(audioRecorder.uri);
-    }
-  }, [recorderState, audioRecorder.uri]);
 
   const checkMicrophonePermission = async () => {
     try {
       const { status } = await requestRecordingPermissionsAsync();
-      const granted = status === 'granted';
-      setMicPermissionGranted(granted);
-      console.log('[Audio] Microphone permission status:', status);
-    } catch (error) {
-      console.log('[Audio] Error checking permissions:', error);
-    }
+      setMicPermissionGranted(status === 'granted');
+    } catch (error) { console.log('[Audio] Permission error:', error); }
   };
 
   const handleStartListening = async () => {
-    console.log('[Audio] Starting listening...');
-    
     if (!micPermissionGranted) {
-      console.log('[Audio] Requesting microphone permission...');
       const { status } = await requestRecordingPermissionsAsync();
       if (status !== 'granted') {
-        Alert.alert('Permission Required', 'Microphone permission is needed for voice interaction.');
-        setMicPermissionGranted(false);
+        Alert.alert('Permission Required', 'Microphone permission is needed.');
         return;
       }
       setMicPermissionGranted(true);
     }
 
+    Speech.stop();
     setIsListening(true);
     setAvatarState('listening');
     setTranscript('');
     setAiResponse(null);
     setShowResponse(false);
-    setRecordingUri(null);
 
     try {
-      console.log('[Audio] Setting audio mode...');
-      await setAudioModeAsync({
-        allowsRecording: true,
-        playsInSilentMode: true,
-      });
-
-      console.log('[Audio] Preparing recording...');
+      await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
       await audioRecorder.prepareToRecordAsync();
-      
-      console.log('[Audio] Starting recording...');
       audioRecorder.record();
-      console.log('[Audio] Recording started successfully - tap stop when done');
-      
     } catch (error) {
-      console.log('[Audio] Recording error:', error);
       setIsListening(false);
       setAvatarState('idle');
-      Alert.alert('Error', 'Failed to start recording. Please try again.');
     }
   };
 
   const handleStopListening = async () => {
-    console.log('[Audio] Stopping listening...');
-    
-    if (recordingTimerRef.current) {
-      clearInterval(recordingTimerRef.current);
-      recordingTimerRef.current = null;
-    }
-
-    if (!audioRecorder || !recorderState?.isRecording) {
-      console.log('[Audio] No recording to stop');
-      setIsListening(false);
-      return;
-    }
-
+    if (!audioRecorder || !recorderState?.isRecording) return;
     setIsListening(false);
     setIsProcessing(true);
-    setAvatarState('listening');
-
+    setAvatarState('thinking');
     try {
-      console.log('[Audio] Stopping recording...');
       await audioRecorder.stop();
-      
       const uri = audioRecorder.uri;
-      console.log('[Audio] Recording URI:', uri);
-
-      await setAudioModeAsync({
-        allowsRecording: false,
-      });
-
-      if (uri) {
-        console.log('[Audio] Processing voice recording...');
-        await processVoiceRecording(uri);
-      } else {
-        console.log('[Audio] No URI from recording');
-        Alert.alert('Error', 'No audio recorded. Please try again.');
-        setAvatarState('idle');
-      }
-    } catch (error) {
-      console.log('[Audio] Error stopping recording:', error);
-      Alert.alert('Error', 'Failed to process recording. Please try again.');
-      setAvatarState('idle');
-    } finally {
-      setIsProcessing(false);
-    }
+      await setAudioModeAsync({ allowsRecording: false });
+      if (uri) await processVoiceRecording(uri);
+      else setAvatarState('idle');
+    } catch (error) { setAvatarState('idle'); }
+    finally { setIsProcessing(false); }
   };
 
   const processVoiceRecording = async (audioUri: string) => {
-    console.log('[Audio] processVoiceRecording called with URI:', audioUri);
     setIsProcessing(true);
-    setAvatarState('listening');
-
+    setAvatarState('thinking');
     try {
-      const filename = 'recording.m4a';
-      const type = 'audio/m4a';
-
       const formData = new FormData();
-      formData.append('audio', {
-        uri: audioUri,
-        name: filename,
-        type,
-      } as any);
+      formData.append('audio', { uri: audioUri, name: 'recording.m4a', type: 'audio/m4a' } as any);
       formData.append('userId', userId || 'anonymous');
       formData.append('userEmail', userEmail || 'anonymous@example.com');
 
-      console.log('[Audio] Sending to backend...', { userId, userEmail });
       const apiUrl = getApiBaseUrl();
-      console.log('[Audio] API URL:', apiUrl);
+      const response = await fetch(`${apiUrl}/api/avatar/analyze-voice`, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json' },
+        body: formData,
+      });
 
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 60000);
-
-      try {
-        const response = await fetch(`${apiUrl}/api/avatar/analyze-voice`, {
-          method: 'POST',
-          headers: {
-            'Accept': 'application/json',
-          },
-          body: formData,
-          signal: controller.signal,
-        });
-
-        clearTimeout(timeoutId);
-        console.log('[Audio] Response status:', response.status);
-
-        if (response.ok) {
-          const data: VoiceAnalysis = await response.json();
-          console.log('[Audio] Received response:', JSON.stringify(data));
-          
-          setTranscript(data.transcript || 'No speech detected');
-          setAiResponse(data);
-          setShowResponse(true);
-          
-          if (data.suggestions) {
-            console.log('[Audio] Speaking response...');
-            setAvatarState('speaking');
-            
-            await Speech.speak(data.suggestions, {
-              language: 'en-US',
-              pitch: 1.0,
-              rate: 0.9,
-              voice: '147342',
-              onDone: () => {
-                console.log('[Audio] Speech completed');
-                setAvatarState('idle');
-              },
-              onError: (error) => {
-                console.log('[Audio] Speech error:', error);
-                setAvatarState('idle');
-              },
-            });
-          } else {
-            setAvatarState('idle');
-          }
-        } else {
-          console.log('[Audio] Server error:', response.status);
-          const errorText = await response.text();
-          console.log('[Audio] Server error response:', errorText);
-          let errorMessage = 'Failed to analyze voice. Please try again.';
-          try {
-            const errorData = JSON.parse(errorText);
-            if (errorData.detail) {
-              errorMessage = errorData.detail;
-            }
-          } catch {}
-          Alert.alert('Error', errorMessage);
-          setAvatarState('idle');
-        }
-      } catch (fetchError: any) {
-        clearTimeout(timeoutId);
-        console.log('[Audio] Fetch error:', fetchError.message || fetchError);
-        if (fetchError.name === 'AbortError') {
-          Alert.alert('Timeout', 'The request took too long. Please try again.');
-        } else {
-          Alert.alert('Error', `Failed to connect: ${fetchError.message || 'Unknown error'}`);
-        }
-        setAvatarState('idle');
-      }
-    } catch (error) {
-      console.log('[Audio] Voice processing error:', error);
-      Alert.alert('Error', 'Failed to process voice. Please try again.');
-      setAvatarState('idle');
-    } finally {
-      setIsProcessing(false);
-    }
+      if (response.ok) {
+        const data: VoiceAnalysis = await response.json();
+        setTranscript(data.transcript || 'No speech detected');
+        setAiResponse(data);
+        setShowResponse(true);
+        if (data.suggestions) {
+          const emotion = data.emotion?.toLowerCase();
+          setAvatarState((emotion === 'happy' || emotion === 'excited') ? 'speaking_happy' : 'speaking_compassionate');
+          const speechText = Array.isArray(data.suggestions) ? data.suggestions.join('. ') : data.suggestions;
+          await Speech.speak(speechText, {
+            language: 'en-US',
+            onDone: () => setAvatarState('idle'),
+            onError: () => setAvatarState('idle'),
+          });
+        } else setAvatarState('idle');
+      } else setAvatarState('idle');
+    } catch (error) { setAvatarState('idle'); }
+    finally { setIsProcessing(false); }
   };
 
-  const getWarningColor = (warning: string) => {
+  const getWarningColor = (warning: any) => {
     if (!warning) return '#22C55E';
-    const lower = warning.toLowerCase();
-    if (lower.includes('urgent') || lower.includes('immediate')) return '#EF4444';
-    if (lower.includes('consider') || lower.includes('recommended')) return '#F97316';
-    if (lower.includes('monitor') || lower.includes('watch')) return '#EAB308';
-    return '#22C55E';
-  };
-
-  const getEmotionEmoji = (emotion: string) => {
-    const emojis: { [key: string]: string } = {
-      happy: '😊',
-      sad: '😢',
-      angry: '😠',
-      anxious: '😰',
-      frustrated: '😤',
-      neutral: '😐',
-      excited: '🤩',
-      tired: '😴',
-    };
-    return emojis[emotion?.toLowerCase()] || '😐';
+    let warningText = typeof warning === 'string' ? warning : (warning[0]?.reason || '');
+    return warningText.toLowerCase().includes('urgent') ? '#EF4444' : (warningText.toLowerCase().includes('consider') ? '#F97316' : '#22C55E');
   };
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
-      {/* Header */}
+      {/* Fixed Header */}
       <View style={styles.header}>
         <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
           <Ionicons name="arrow-back" size={24} color="#333" />
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>AI Companion</Text>
+        <Text style={styles.headerTitle}>MindSync AI</Text>
         <View style={{ width: 40 }} />
       </View>
 
-      <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
-        {/* Avatar Container */}
-        <View style={styles.avatarContainer}>
-          <View style={styles.avatarEmojiContainer}>
-            <Text style={styles.avatarEmoji}>{getAvatarEmoji()}</Text>
-          </View>
+      <ScrollView 
+        contentContainerStyle={styles.scrollContent} 
+        showsVerticalScrollIndicator={false}
+        removeClippedSubviews={false} // Important for native views in scroll
+      >
+        {/* Avatar Container - Stable Layout */}
+        <View style={styles.avatarWrapper}>
+          <View style={styles.avatarContainer}>
+            <Animated.View style={[styles.videoLayer, animatedStyleA]}>
+              <VideoView player={playerA} style={styles.videoView} contentFit="cover" nativeControls={false} />
+            </Animated.View>
+            <Animated.View style={[styles.videoLayer, animatedStyleB]}>
+              <VideoView player={playerB} style={styles.videoView} contentFit="cover" nativeControls={false} />
+            </Animated.View>
 
-          {/* State Indicator */}
-          <View style={styles.stateIndicator}>
-            <Text style={styles.stateText}>
-              {isProcessing ? 'Processing...' : 
-               avatarState === 'listening' ? 'Listening...' : 
-               avatarState === 'speaking' ? 'Speaking...' : 'Hello!'}
-            </Text>
+            {/* State Overlay */}
+            <View style={styles.stateIndicator}>
+              <Text style={styles.stateText}>
+                {isProcessing ? 'Thinking...' : 
+                 avatarState === 'listening' ? 'I\'m listening...' : 
+                 avatarState.startsWith('speaking') ? 'Responding...' : 'Always here for you'}
+              </Text>
+            </View>
           </View>
         </View>
 
-        {/* Microphone Button */}
+        {/* Controls */}
         <View style={styles.micContainer}>
           <TouchableOpacity
-            style={[
-              styles.micButton,
-              isListening && styles.micButtonActive,
-              isProcessing && styles.micButtonProcessing,
-            ]}
+            style={[styles.micButton, isListening && styles.micButtonActive, isProcessing && styles.micButtonProcessing]}
             onPress={isListening ? handleStopListening : handleStartListening}
             disabled={isProcessing}
           >
-            {isProcessing ? (
-              <ActivityIndicator size="large" color="#fff" />
-            ) : (
-              <Ionicons 
-                name={isListening ? 'stop' : 'mic'} 
-                size={32} 
-                color="#fff" 
-              />
-            )}
+            {isProcessing ? <ActivityIndicator size="large" color="#fff" /> : <Ionicons name={isListening ? 'stop' : 'mic'} size={32} color="#fff" />}
           </TouchableOpacity>
-          <Text style={styles.micHint}>
-            {isListening ? 'Tap to stop' : 'Tap to speak'}
-          </Text>
+          <Text style={styles.micHint}>{isListening ? 'Tap to stop' : 'Tap to speak to me'}</Text>
         </View>
 
-        {/* Transcript Display */}
-        {transcript ? (
-          <View style={styles.transcriptContainer}>
-            <View style={styles.sectionHeader}>
-              <MaterialCommunityIcons name="microphone-message" size={20} color="#00E0C6" />
-              <Text style={styles.sectionTitle}>Your Words</Text>
-            </View>
-            <Text style={styles.transcriptText}>{transcript}</Text>
-          </View>
-        ) : null}
+        {/* Display Info */}
+        {transcript ? <View style={styles.transcriptContainer}><Text style={styles.transcriptText}>"{transcript}"</Text></View> : null}
 
-        {/* AI Response */}
         {showResponse && aiResponse ? (
           <View style={styles.responseContainer}>
-            <View style={styles.sectionHeader}>
-              <MaterialCommunityIcons name="brain" size={20} color="#9D4EDD" />
-              <Text style={styles.sectionTitle}>AI Analysis</Text>
+            <View style={styles.suggestionCard}>
+              <Text style={styles.suggestionText}>{Array.isArray(aiResponse.suggestions) ? aiResponse.suggestions.join('. ') : aiResponse.suggestions}</Text>
             </View>
-
-            {/* Emotion Display */}
-            <View style={styles.emotionCard}>
-              <Text style={styles.emotionEmoji}>{getEmotionEmoji(aiResponse.emotion)}</Text>
-              <View style={styles.emotionInfo}>
-                <Text style={styles.emotionLabel}>Detected Emotion</Text>
-                <Text style={styles.emotionValue}>
-                  {aiResponse.emotion || 'Neutral'} 
-                  {aiResponse.confidence ? ` (${aiResponse.confidence}% confidence)` : ''}
-                </Text>
-              </View>
-            </View>
-
-            {/* Suggestions */}
-            {aiResponse.suggestions ? (
-              <View style={styles.suggestionCard}>
-                <View style={styles.suggestionHeader}>
-                  <Ionicons name="bulb-outline" size={18} color="#F97316" />
-                  <Text style={styles.suggestionTitle}>Suggestions</Text>
-                </View>
-                <Text style={styles.suggestionText}>{aiResponse.suggestions}</Text>
-              </View>
-            ) : null}
-
-            {/* Early Warning */}
             {aiResponse.earlyWarning ? (
               <View style={[styles.warningCard, { borderColor: getWarningColor(aiResponse.earlyWarning) }]}>
                 <View style={styles.warningHeader}>
-                  <Ionicons name="warning-outline" size={18} color={getWarningColor(aiResponse.earlyWarning)} />
-                  <Text style={[styles.warningTitle, { color: getWarningColor(aiResponse.earlyWarning) }]}>
-                    Note
-                  </Text>
+                  <Ionicons name="heart-outline" size={18} color={getWarningColor(aiResponse.earlyWarning)} />
+                  <Text style={[styles.warningTitle, { color: getWarningColor(aiResponse.earlyWarning) }]}>MindSync Note</Text>
                 </View>
-                <Text style={styles.warningText}>{aiResponse.earlyWarning}</Text>
+                <Text style={styles.warningText}>{typeof aiResponse.earlyWarning === 'string' ? aiResponse.earlyWarning : (Array.isArray(aiResponse.earlyWarning) ? aiResponse.earlyWarning.map((w: any) => w.reason).join('\n') : 'I care about your well-being.')}</Text>
               </View>
             ) : null}
           </View>
         ) : null}
 
-        {/* Quick Access Buttons */}
-        <Text style={styles.quickAccessTitle}>Quick Access</Text>
-        <View style={styles.quickAccessContainer}>
-          <TouchableOpacity 
-            style={styles.quickAccessButton}
-            onPress={() => router.push('/tasks')}
-          >
-            <MaterialCommunityIcons name="checkbox-marked-outline" size={24} color="#9D4EDD" />
-            <Text style={styles.quickAccessText}>Tasks</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity 
-            style={styles.quickAccessButton}
-            onPress={() => router.push('/journal')}
-          >
-            <MaterialCommunityIcons name="book-outline" size={24} color="#00E0C6" />
-            <Text style={styles.quickAccessText}>Journal</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity 
-            style={styles.quickAccessButton}
-            onPress={() => router.push('/home')}
-          >
-            <MaterialCommunityIcons name="account-outline" size={24} color="#F97316" />
-            <Text style={styles.quickAccessText}>Profile</Text>
-          </TouchableOpacity>
-        </View>
-
-        <View style={{ height: 40 }} />
+        <View style={{ height: 120 }} />
       </ScrollView>
 
-      {/* Bottom Navigation */}
+      {/* Navigation */}
       <View style={[styles.bottomNav, { paddingBottom: Math.max(insets.bottom, 10) }]}>
-        <TouchableOpacity style={styles.navItem} onPress={() => router.push('/home')}>
-          <Ionicons name="home-outline" size={26} color="#888" />
-          <Text style={styles.navText}>Home</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.navItem} onPress={() => router.push('/journal')}>
-          <Ionicons name="book-outline" size={26} color="#888" />
-          <Text style={styles.navText}>Journal</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.navItemActive}>
-          <MaterialCommunityIcons name="account-voice" size={26} color="#00E0C6" />
-          <Text style={[styles.navText, { color: '#00E0C6' }]}>Avatar</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.navItem} onPress={() => router.push('/tasks')}>
-          <Ionicons name="checkbox-outline" size={26} color="#888" />
-          <Text style={styles.navText}>Tasks</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.navItem} onPress={() => router.push('/docs')}>
-          <Ionicons name="documents-outline" size={26} color="#888" />
-          <Text style={styles.navText}>Docs</Text>
-        </TouchableOpacity>
+        <TouchableOpacity style={styles.navItem} onPress={() => router.push('/home')}><Ionicons name="home-outline" size={26} color="#888" /><Text style={styles.navText}>Home</Text></TouchableOpacity>
+        <TouchableOpacity style={styles.navItem} onPress={() => router.push('/journal')}><Ionicons name="book-outline" size={26} color="#888" /><Text style={styles.navText}>Journal</Text></TouchableOpacity>
+        <TouchableOpacity style={styles.navItemActive}><MaterialCommunityIcons name="account-voice" size={26} color="#00E0C6" /><Text style={[styles.navText, { color: '#00E0C6' }]}>Avatar</Text></TouchableOpacity>
+        <TouchableOpacity style={styles.navItem} onPress={() => router.push('/tasks')}><Ionicons name="checkbox-outline" size={26} color="#888" /><Text style={styles.navText}>Tasks</Text></TouchableOpacity>
+        <TouchableOpacity style={styles.navItem} onPress={() => router.push('/docs')}><Ionicons name="documents-outline" size={26} color="#888" /><Text style={styles.navText}>Docs</Text></TouchableOpacity>
       </View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#FAFCFC',
-  },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-  },
-  backButton: {
-    padding: 8,
-  },
-  headerTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: '#333',
-  },
-  scrollContent: {
-    paddingHorizontal: 20,
-    paddingTop: 10,
-  },
-  avatarContainer: {
-    width: '100%',
-    height: 280,
-    borderRadius: 24,
-    overflow: 'hidden',
-    backgroundColor: '#E0F7F4',
-    position: 'relative',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  avatarEmojiContainer: {
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  avatarEmoji: {
-    fontSize: 140,
-  },
-  stateIndicator: {
-    position: 'absolute',
-    bottom: 16,
-    alignSelf: 'center',
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 20,
-  },
-  stateText: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  micContainer: {
-    alignItems: 'center',
-    marginTop: 24,
-    marginBottom: 20,
-  },
-  micButton: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
-    backgroundColor: '#00E0C6',
-    justifyContent: 'center',
-    alignItems: 'center',
-    elevation: 4,
-    shadowColor: '#000',
-    shadowOpacity: 0.2,
-    shadowRadius: 5,
-    shadowOffset: { width: 0, height: 3 },
-  },
-  micButtonActive: {
-    backgroundColor: '#EF4444',
-  },
-  micButtonProcessing: {
-    backgroundColor: '#9D4EDD',
-  },
-  micHint: {
-    marginTop: 8,
-    fontSize: 14,
-    color: '#666',
-  },
-  transcriptContainer: {
-    backgroundColor: '#fff',
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 16,
-    elevation: 2,
-    shadowColor: '#000',
-    shadowOpacity: 0.05,
-    shadowRadius: 4,
-  },
-  sectionHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 12,
-    gap: 8,
-  },
-  sectionTitle: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    color: '#333',
-  },
-  transcriptText: {
-    fontSize: 15,
-    color: '#444',
-    lineHeight: 22,
-  },
-  responseContainer: {
-    marginBottom: 20,
-  },
-  emotionCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#F3E8FF',
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 12,
-  },
-  emotionEmoji: {
-    fontSize: 40,
-    marginRight: 16,
-  },
-  emotionInfo: {
-    flex: 1,
-  },
-  emotionLabel: {
-    fontSize: 12,
-    color: '#666',
-    marginBottom: 4,
-  },
-  emotionValue: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: '#333',
-    textTransform: 'capitalize',
-  },
-  suggestionCard: {
-    backgroundColor: '#FFF7ED',
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 12,
-    borderLeftWidth: 4,
-    borderLeftColor: '#F97316',
-  },
-  suggestionHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 8,
-    gap: 8,
-  },
-  suggestionTitle: {
-    fontSize: 14,
-    fontWeight: 'bold',
-    color: '#F97316',
-  },
-  suggestionText: {
-    fontSize: 14,
-    color: '#444',
-    lineHeight: 20,
-  },
-  warningCard: {
-    backgroundColor: '#FEF2F2',
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 12,
-    borderLeftWidth: 4,
-    borderWidth: 1,
-  },
-  warningHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 8,
-    gap: 8,
-  },
-  warningTitle: {
-    fontSize: 14,
-    fontWeight: 'bold',
-  },
-  warningText: {
-    fontSize: 14,
-    color: '#666',
-    lineHeight: 20,
-  },
-  quickAccessTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: '#333',
-    marginBottom: 12,
-  },
-  quickAccessContainer: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-  },
-  quickAccessButton: {
-    flex: 1,
-    backgroundColor: '#fff',
-    borderRadius: 16,
-    padding: 16,
-    marginHorizontal: 4,
-    alignItems: 'center',
-    elevation: 2,
-    shadowColor: '#000',
-    shadowOpacity: 0.05,
-    shadowRadius: 4,
-  },
-  quickAccessText: {
-    marginTop: 8,
-    fontSize: 12,
-    color: '#666',
-    fontWeight: '500',
-  },
-  bottomNav: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    backgroundColor: '#fff',
-    paddingTop: 12,
-    borderTopWidth: 1,
-    borderTopColor: '#f0f0f0',
-  },
-  navItem: {
-    alignItems: 'center',
-    flex: 1,
-  },
-  navItemActive: {
-    alignItems: 'center',
-    flex: 1,
-  },
-  navText: {
-    fontSize: 12,
-    marginTop: 4,
-    color: '#888',
-  },
+  container: { flex: 1, backgroundColor: '#fff' },
+  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 12, backgroundColor: '#fff', zIndex: 1000 },
+  backButton: { padding: 8 },
+  headerTitle: { fontSize: 20, fontWeight: 'bold', color: '#333' },
+  scrollContent: { paddingHorizontal: 20, paddingTop: 10 },
+  avatarWrapper: { width: '100%', height: AVATAR_HEIGHT, alignItems: 'center', justifyContent: 'center', marginBottom: 10 },
+  avatarContainer: { width: '100%', height: '100%', borderRadius: 30, overflow: 'hidden', backgroundColor: '#000', position: 'relative' },
+  videoLayer: { position: 'absolute', width: '100%', height: '100%' },
+  videoView: { width: '100%', height: '100%' },
+  stateIndicator: { position: 'absolute', bottom: 20, alignSelf: 'center', backgroundColor: 'rgba(0,0,0,0.5)', paddingHorizontal: 20, paddingVertical: 10, borderRadius: 25, zIndex: 999 },
+  stateText: { color: '#fff', fontSize: 14, fontWeight: '600' },
+  micContainer: { alignItems: 'center', marginTop: 20, marginBottom: 20 },
+  micButton: { width: 80, height: 80, borderRadius: 40, backgroundColor: '#00E0C6', justifyContent: 'center', alignItems: 'center', elevation: 8, shadowColor: '#00E0C6', shadowOpacity: 0.4, shadowRadius: 10, shadowOffset: { width: 0, height: 5 } },
+  micButtonActive: { backgroundColor: '#FF4757', shadowColor: '#FF4757' },
+  micButtonProcessing: { backgroundColor: '#7158e2' },
+  micHint: { marginTop: 12, fontSize: 15, color: '#666', fontWeight: '500' },
+  transcriptContainer: { padding: 20, backgroundColor: '#f8f9fa', borderRadius: 20, marginVertical: 10 },
+  transcriptText: { fontSize: 16, color: '#444', textAlign: 'center', fontStyle: 'italic' },
+  responseContainer: { marginTop: 10 },
+  suggestionCard: { backgroundColor: '#E8F8F5', borderRadius: 20, padding: 20, marginBottom: 15 },
+  suggestionText: { fontSize: 16, color: '#2D3436', lineHeight: 24 },
+  warningCard: { backgroundColor: '#FFF5F5', borderRadius: 20, padding: 20, borderLeftWidth: 5 },
+  warningHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 10, gap: 8 },
+  warningTitle: { fontSize: 15, fontWeight: 'bold' },
+  warningText: { fontSize: 14, color: '#636E72', lineHeight: 20 },
+  bottomNav: { position: 'absolute', bottom: 0, left: 0, right: 0, flexDirection: 'row', justifyContent: 'space-around', backgroundColor: '#fff', paddingTop: 12, borderTopWidth: 1, borderTopColor: '#f0f0f0', zIndex: 1000 },
+  navItem: { alignItems: 'center', flex: 1 },
+  navItemActive: { alignItems: 'center', flex: 1 },
+  navText: { fontSize: 12, marginTop: 4, color: '#888' },
 });

@@ -47,7 +47,8 @@
         {
           "microphonePermission": "Allow MindSync to access your microphone for voice analysis."
         }
-      ]
+      ],
+      "expo-video"
     ],
     "experiments": {
       "typedRoutes": true,

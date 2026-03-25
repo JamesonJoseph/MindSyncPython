@@ -180,7 +180,7 @@ export default function VaultScreen() {
         {filteredEntries.length > 0 ? (
           <FlatList
             data={filteredEntries}
-            keyExtractor={item => item.id}
+            keyExtractor={(item, index) => item._id || item.id || `vault-${index}`}
             renderItem={renderItem}
             showsVerticalScrollIndicator={false}
             contentContainerStyle={styles.listContent}

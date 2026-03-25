@@ -67,6 +67,12 @@ export default function JournalScreen() {
       const response = await authFetch(`${apiUrl}/api/journals?userId=${user.uid}`);
       const data = await response.json();
       
+      if (!Array.isArray(data)) {
+        console.error("Fetched data is not an array:", data);
+        setJournals([]);
+        return;
+      }
+      
       const formattedData = data.map((item: any) => {
         const dateObj = new Date(item.date);
         return {

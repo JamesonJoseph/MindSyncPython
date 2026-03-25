@@ -8,6 +8,9 @@ import {
   TextInput,
   ActivityIndicator,
   Alert,
+  ScrollView,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -180,7 +183,7 @@ export default function DocsScreen() {
         {filteredEntries.length > 0 ? (
           <FlatList
             data={filteredEntries}
-            keyExtractor={item => item.id}
+            keyExtractor={(item, index) => item._id || item.id || `entry-${index}`}
             renderItem={renderItem}
             showsVerticalScrollIndicator={false}
             contentContainerStyle={styles.listContent}
@@ -251,13 +254,20 @@ function AddVaultEntryModal({ onClose }: { onClose: () => void }) {
       Alert.alert('Error', 'Please enter a title');
       return;
     }
-    await addEntry({ title, username, password, category });
-    onClose();
+    try {
+      await addEntry({ title, username, password, category });
+      onClose();
+    } catch (error) {
+      Alert.alert('Error', 'Failed to save entry');
+    }
   };
 
   return (
-    <View style={styles.modalOverlay}>
-      <View style={[styles.modalContent, { paddingBottom: 20 }]}>
+    <KeyboardAvoidingView 
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      style={styles.modalOverlay}
+    >
+      <View style={styles.modalContent}>
         <View style={styles.modalHeader}>
           <Text style={styles.modalTitle}>Add New Entry</Text>
           <TouchableOpacity onPress={onClose}>
@@ -265,72 +275,74 @@ function AddVaultEntryModal({ onClose }: { onClose: () => void }) {
           </TouchableOpacity>
         </View>
 
-        <Text style={styles.inputLabel}>Title</Text>
-        <TextInput
-          style={styles.modalInput}
-          placeholder="Enter title"
-          value={title}
-          onChangeText={setTitle}
-          placeholderTextColor="#999"
-        />
-
-        <Text style={styles.inputLabel}>Username / Email</Text>
-        <TextInput
-          style={styles.modalInput}
-          placeholder="Enter username or email"
-          value={username}
-          onChangeText={setUsername}
-          placeholderTextColor="#999"
-          autoCapitalize="none"
-        />
-
-        <Text style={styles.inputLabel}>Password / Secret</Text>
-        <View style={styles.passwordContainer}>
+        <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 40 }}>
+          <Text style={styles.inputLabel}>Title</Text>
           <TextInput
-            style={[styles.modalInput, { flex: 1 }]}
-            placeholder="Enter password or secret"
-            value={password}
-            onChangeText={setPassword}
+            style={styles.modalInput}
+            placeholder="Enter title"
+            value={title}
+            onChangeText={setTitle}
             placeholderTextColor="#999"
-            secureTextEntry={!showPassword}
           />
-          <TouchableOpacity 
-            style={styles.eyeButton}
-            onPress={() => setShowPassword(!showPassword)}
-          >
-            <Ionicons 
-              name={showPassword ? 'eye-off' : 'eye'} 
-              size={24} 
-              color="#999" 
+
+          <Text style={styles.inputLabel}>Username / Email</Text>
+          <TextInput
+            style={styles.modalInput}
+            placeholder="Enter username or email"
+            value={username}
+            onChangeText={setUsername}
+            placeholderTextColor="#999"
+            autoCapitalize="none"
+          />
+
+          <Text style={styles.inputLabel}>Password / Secret</Text>
+          <View style={styles.passwordContainer}>
+            <TextInput
+              style={[styles.modalInput, { flex: 1 }]}
+              placeholder="Enter password or secret"
+              value={password}
+              onChangeText={setPassword}
+              placeholderTextColor="#999"
+              secureTextEntry={!showPassword}
             />
-          </TouchableOpacity>
-        </View>
-
-        <Text style={styles.inputLabel}>Category</Text>
-        <View style={styles.categoryContainer}>
-          {categories.map(cat => (
-            <TouchableOpacity
-              key={cat}
-              style={[styles.categoryChip, category === cat && styles.categoryChipActive]}
-              onPress={() => setCategory(cat)}
+            <TouchableOpacity 
+              style={styles.eyeButton}
+              onPress={() => setShowPassword(!showPassword)}
             >
-              <MaterialCommunityIcons 
-                name={getCategoryIcon(cat) as any} 
-                size={16} 
-                color={category === cat ? '#fff' : '#666'} 
+              <Ionicons 
+                name={showPassword ? 'eye-off' : 'eye'} 
+                size={24} 
+                color="#999" 
               />
-              <Text style={[styles.categoryChipText, category === cat && styles.categoryChipTextActive]}>
-                {cat}
-              </Text>
             </TouchableOpacity>
-          ))}
-        </View>
+          </View>
 
-        <TouchableOpacity style={styles.saveButton} onPress={handleSave}>
-          <Text style={styles.saveButtonText}>Save Entry</Text>
-        </TouchableOpacity>
+          <Text style={styles.inputLabel}>Category</Text>
+          <View style={styles.categoryContainer}>
+            {categories.map(cat => (
+              <TouchableOpacity
+                key={cat}
+                style={[styles.categoryChip, category === cat && styles.categoryChipActive]}
+                onPress={() => setCategory(cat)}
+              >
+                <MaterialCommunityIcons 
+                  name={getCategoryIcon(cat) as any} 
+                  size={16} 
+                  color={category === cat ? '#fff' : '#666'} 
+                />
+                <Text style={[styles.categoryChipText, category === cat && styles.categoryChipTextActive]}>
+                  {cat}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+
+          <TouchableOpacity style={styles.saveButton} onPress={handleSave}>
+            <Text style={styles.saveButtonText}>Save Entry</Text>
+          </TouchableOpacity>
+        </ScrollView>
       </View>
-    </View>
+    </KeyboardAvoidingView>
   );
 }
 

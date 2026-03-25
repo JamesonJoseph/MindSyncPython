@@ -413,218 +413,205 @@ export default function TasksScreen() {
         </TouchableOpacity>
       </View>
 
-      <ScrollView style={styles.scrollContent} showsVerticalScrollIndicator={false}>
-      {/* Date Navigation */}
-      <View style={styles.dateNavContainer}>
-        <TouchableOpacity onPress={goToPreviousMonth} style={styles.navButton}>
-          <Ionicons name="chevron-back" size={28} color="#333" />
-        </TouchableOpacity>
-        <View style={styles.monthYearDisplay}>
-          <Text style={styles.monthText}>{getMonthName(currentDate)}</Text>
-          <Text style={styles.yearText}>{currentDate.getFullYear()}</Text>
-        </View>
-        <TouchableOpacity onPress={goToNextMonth} style={styles.navButton}>
-          <Ionicons name="chevron-forward" size={28} color="#333" />
-        </TouchableOpacity>
-      </View>
-
-      {/* Calendar Grid */}
-      <View style={styles.calendarContainer}>
-        {/* Weekday Headers */}
-        <View style={styles.weekdayRow}>
-          <Text style={styles.weekdayText}>Sun</Text>
-          <Text style={styles.weekdayText}>Mon</Text>
-          <Text style={styles.weekdayText}>Tue</Text>
-          <Text style={styles.weekdayText}>Wed</Text>
-          <Text style={styles.weekdayText}>Thu</Text>
-          <Text style={styles.weekdayText}>Fri</Text>
-          <Text style={styles.weekdayText}>Sat</Text>
-        </View>
-        
-        {/* Calendar Days */}
-        <View style={styles.daysContainer}>
-          {/* Empty cells for days before month starts */}
-          {[...Array(getFirstDayOfMonth(currentDate.getFullYear(), currentDate.getMonth()))].map((_, index) => (
-            <View key={index} style={styles.dayCell} />
-          ))}
+      <FlatList
+        data={getItemsForDate()}
+        keyExtractor={item => item.id}
+        renderItem={({ item }) => {
+          const isCompleted = item.status === 'completed';
+          const priorityInfo = priorityOptions.find(p => p.value === item.priority);
           
-          {/* Days of the month */}
-          {[...Array(getDaysInMonth(currentDate.getFullYear(), currentDate.getMonth()))].map((_, dayIndex) => {
-            const date = new Date(currentDate.getFullYear(), currentDate.getMonth(), dayIndex + 1);
-            const isTodayDate = isToday(date);
-            const isSelectedDate = isSelected(date);
-            const hasTasksOnDate = hasTasks(date);
-            const birthdaysOnDate = getBirthdaysForDate(date);
-            
-            return (
-              <TouchableOpacity
-                key={dayIndex}
-                style={[
-                  styles.dayCell,
-                  isSelectedDate && styles.selectedDay,
-                  isTodayDate && styles.todayDay,
-                  hasTasksOnDate && styles.hasTaskDay,
-                  birthdaysOnDate.length > 0 && styles.hasBirthdayDay
-                ]}
-                onPress={() => handleDateSelect(date)}
-              >
-                <Text style={styles.dayNumber}>{dayIndex + 1}</Text>
-                
-                {/* Task indicator */}
-                {hasTasksOnDate && (
-                  <View style={styles.taskIndicator}>
-                    <Text style={styles.taskIndicatorText}>●</Text>
-                  </View>
-                )}
-                
-                {/* Birthday indicator */}
-                {birthdaysOnDate.length > 0 && (
-                  <View style={styles.birthdayIndicator}>
-                    <Text style={styles.birthdayIndicatorText}>🎂</Text>
-                  </View>
-                )}
-              </TouchableOpacity>
-            );
-          })}
-        </View>
-      </View>
-
-      {/* Selected Date Header */}
-      <View style={styles.selectedDateContainer}>
-        <View style={styles.selectedDateLeft}>
-          <Text style={styles.dayNameText}>
-            {selectedDate.toLocaleDateString('en-US', { weekday: 'long' })}
-          </Text>
-          <Text style={styles.selectedDateText}>
-            {selectedDate.getDate()}
-          </Text>
-        </View>
-        <View style={styles.selectedDateActions}>
-          <TouchableOpacity style={styles.actionButton} onPress={() => router.push('/add-journal')}>
-            <Ionicons name="create" size={20} color="#00E0C6" />
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.actionButton} onPress={() => router.push('/chat')}>
-            <Ionicons name="chatbubble-ellipses" size={20} color="#00E0C6" />
-          </TouchableOpacity>
-        </View>
-      </View>
-
-      {/* Birthdays on Selected Date */}
-      {getBirthdaysForDate(selectedDate).length > 0 && (
-        <View style={styles.dateBirthdaysSection}>
-          {getBirthdaysForDate(selectedDate).map((birthday) => (
-            <TouchableOpacity 
-              key={birthday.id} 
-              style={[styles.dateBirthdayCard, { borderLeftColor: birthday.color || '#FF6B6B' }]}
-              onPress={() => router.push(`/birthday-detail?id=${birthday.id}&name=${encodeURIComponent(birthday.name)}&date=${birthday.date}&relation=${encodeURIComponent(birthday.relation || '')}&color=${birthday.color || '#FF6B6B'}`)}
+          const handlePress = () => {
+            if (item.type === 'birthday') {
+              const birthday = birthdays.find(b => `bday-${b.id}` === item.id);
+              if (birthday) {
+                router.push(`/birthday-detail?id=${birthday.id}&name=${encodeURIComponent(birthday.name)}&date=${birthday.date}&relation=${encodeURIComponent(birthday.relation || '')}&color=${birthday.color || '#FF6B6B'}`);
+              }
+            }
+          };
+          
+          const CardComponent = item.type !== 'task' ? TouchableOpacity : View;
+          
+          return (
+            <CardComponent 
+              style={[styles.itemCard, { borderLeftColor: item.color }]}
+              onPress={item.type !== 'task' ? handlePress : undefined}
             >
-              <Text style={styles.dateBirthdayIcon}>🎂</Text>
-              <View style={styles.dateBirthdayInfo}>
-                <Text style={styles.dateBirthdayName}>{birthday.name}'s birthday</Text>
-                <Text style={styles.dateBirthdayRelation}>{birthday.relation}</Text>
+              <View style={styles.itemLeft}>
+                <Text style={styles.itemIcon}>{item.icon}</Text>
+                <View style={styles.itemInfo}>
+                  <View style={styles.titleRow}>
+                    <Text style={[styles.itemTitle, isCompleted && styles.itemTitleCompleted]} numberOfLines={1}>
+                      {item.title}
+                    </Text>
+                    {item.type === 'task' && item.priority && (
+                      <View style={[styles.priorityBadge, { backgroundColor: priorityInfo?.color + '20' }]}>
+                        <Text style={[styles.priorityText, { color: priorityInfo?.color }]}>
+                          {priorityInfo?.icon} {priorityInfo?.label}
+                        </Text>
+                      </View>
+                    )}
+                  </View>
+                  {item.subtitle && (
+                    <Text style={styles.itemSubtitle}>{item.subtitle}</Text>
+                  )}
+                </View>
               </View>
-              <Ionicons name="chevron-forward" size={20} color="#999" />
-            </TouchableOpacity>
-          ))}
-        </View>
-      )}
-
-      {/* Unified Items for Selected Date */}
-      <View style={styles.tasksSection}>
-        <Text style={styles.sectionTitle}>🔥 Today's Focus</Text>
-        {loadingTasks ? (
-          <View style={styles.loadingContainer}>
-            <ActivityIndicator size="small" color="#00E0C6" />
-          </View>
-        ) : (
+              <View style={styles.itemRight}>
+                {item.type === 'task' ? (
+                  <TouchableOpacity 
+                    style={styles.checkButton}
+                    onPress={() => {
+                      const task = getSelectedDateTasks().find(t => t._id === item.id.replace('task-', ''));
+                      if (task) toggleTaskStatus(task);
+                    }}
+                  >
+                    <Ionicons 
+                      name={isCompleted ? "checkmark-circle" : "ellipse-outline"} 
+                      size={26} 
+                      color={isCompleted ? "#34C759" : "#ccc"} 
+                    />
+                  </TouchableOpacity>
+                ) : (
+                  <View style={[styles.typeBadge, { backgroundColor: item.color + '20' }]}>
+                    <Text style={[styles.typeBadgeText, { color: item.color }]}>
+                      {item.type === 'birthday' ? 'Birthday' : 'Event'}
+                    </Text>
+                  </View>
+                )}
+              </View>
+            </CardComponent>
+          );
+        }}
+        ListHeaderComponent={
           <>
-            {getItemsForDate().length > 0 ? (
-              <FlatList
-                data={getItemsForDate()}
-                keyExtractor={item => item.id}
-                renderItem={({ item }) => {
-                  const isCompleted = item.status === 'completed';
-                  const priorityInfo = priorityOptions.find(p => p.value === item.priority);
-                  
-                  const handlePress = () => {
-                    if (item.type === 'birthday') {
-                      const birthday = birthdays.find(b => `bday-${b.id}` === item.id);
-                      if (birthday) {
-                        router.push(`/birthday-detail?id=${birthday.id}&name=${encodeURIComponent(birthday.name)}&date=${birthday.date}&relation=${encodeURIComponent(birthday.relation || '')}&color=${birthday.color || '#FF6B6B'}`);
-                      }
-                    } else if (item.type === 'event') {
-                      // Event detail page - can be added later
-                    }
-                  };
-                  
-                  const CardComponent = item.type !== 'task' ? TouchableOpacity : View;
+            {/* Date Navigation */}
+            <View style={styles.dateNavContainer}>
+              <TouchableOpacity onPress={goToPreviousMonth} style={styles.navButton}>
+                <Ionicons name="chevron-back" size={28} color="#333" />
+              </TouchableOpacity>
+              <View style={styles.monthYearDisplay}>
+                <Text style={styles.monthText}>{getMonthName(currentDate)}</Text>
+                <Text style={styles.yearText}>{currentDate.getFullYear()}</Text>
+              </View>
+              <TouchableOpacity onPress={goToNextMonth} style={styles.navButton}>
+                <Ionicons name="chevron-forward" size={28} color="#333" />
+              </TouchableOpacity>
+            </View>
+
+            {/* Calendar Grid */}
+            <View style={styles.calendarContainer}>
+              <View style={styles.weekdayRow}>
+                <Text style={styles.weekdayText}>Sun</Text>
+                <Text style={styles.weekdayText}>Mon</Text>
+                <Text style={styles.weekdayText}>Tue</Text>
+                <Text style={styles.weekdayText}>Wed</Text>
+                <Text style={styles.weekdayText}>Thu</Text>
+                <Text style={styles.weekdayText}>Fri</Text>
+                <Text style={styles.weekdayText}>Sat</Text>
+              </View>
+              <View style={styles.daysContainer}>
+                {[...Array(getFirstDayOfMonth(currentDate.getFullYear(), currentDate.getMonth()))].map((_, index) => (
+                  <View key={index} style={styles.dayCell} />
+                ))}
+                {[...Array(getDaysInMonth(currentDate.getFullYear(), currentDate.getMonth()))].map((_, dayIndex) => {
+                  const date = new Date(currentDate.getFullYear(), currentDate.getMonth(), dayIndex + 1);
+                  const isTodayDate = isToday(date);
+                  const isSelectedDate = isSelected(date);
+                  const hasTasksOnDate = hasTasks(date);
+                  const birthdaysOnDate = getBirthdaysForDate(date);
                   
                   return (
-                    <CardComponent 
-                      style={[styles.itemCard, { borderLeftColor: item.color }]}
-                      onPress={item.type !== 'task' ? handlePress : undefined}
+                    <TouchableOpacity
+                      key={dayIndex}
+                      style={[
+                        styles.dayCell,
+                        isSelectedDate && styles.selectedDay,
+                        isTodayDate && styles.todayDay,
+                        hasTasksOnDate && styles.hasTaskDay,
+                        birthdaysOnDate.length > 0 && styles.hasBirthdayDay
+                      ]}
+                      onPress={() => handleDateSelect(date)}
                     >
-                      <View style={styles.itemLeft}>
-                        <Text style={styles.itemIcon}>{item.icon}</Text>
-                        <View style={styles.itemInfo}>
-                          <View style={styles.titleRow}>
-                            <Text style={[styles.itemTitle, isCompleted && styles.itemTitleCompleted]} numberOfLines={1}>
-                              {item.title}
-                            </Text>
-                            {item.type === 'task' && item.priority && (
-                              <View style={[styles.priorityBadge, { backgroundColor: priorityInfo?.color + '20' }]}>
-                                <Text style={[styles.priorityText, { color: priorityInfo?.color }]}>
-                                  {priorityInfo?.icon} {priorityInfo?.label}
-                                </Text>
-                              </View>
-                            )}
-                          </View>
-                          {item.subtitle && (
-                            <Text style={styles.itemSubtitle}>{item.subtitle}</Text>
-                          )}
+                      <Text style={styles.dayNumber}>{dayIndex + 1}</Text>
+                      {hasTasksOnDate && (
+                        <View style={styles.taskIndicator}>
+                          <Text style={styles.taskIndicatorText}>●</Text>
                         </View>
-                      </View>
-                      <View style={styles.itemRight}>
-                        {item.type === 'task' ? (
-                          <TouchableOpacity 
-                            style={styles.checkButton}
-                            onPress={() => {
-                              const task = getSelectedDateTasks().find(t => t._id === item.id.replace('task-', ''));
-                              if (task) toggleTaskStatus(task);
-                            }}
-                          >
-                            <Ionicons 
-                              name={isCompleted ? "checkmark-circle" : "ellipse-outline"} 
-                              size={26} 
-                              color={isCompleted ? "#34C759" : "#ccc"} 
-                            />
-                          </TouchableOpacity>
-                        ) : (
-                          <View style={[styles.typeBadge, { backgroundColor: item.color + '20' }]}>
-                            <Text style={[styles.typeBadgeText, { color: item.color }]}>
-                              {item.type === 'birthday' ? 'Birthday' : 'Event'}
-                            </Text>
-                          </View>
-                        )}
-                      </View>
-                    </CardComponent>
+                      )}
+                      {birthdaysOnDate.length > 0 && (
+                        <View style={styles.birthdayIndicator}>
+                          <Text style={styles.birthdayIndicatorText}>🎂</Text>
+                        </View>
+                      )}
+                    </TouchableOpacity>
                   );
-                }}
-                contentContainerStyle={styles.taskListContent}
-              />
-            ) : (
-              <View style={styles.emptyState}>
-                <Text style={styles.emptyIcon}>🎉</Text>
-                <Text style={styles.emptyTitle}>Nothing planned</Text>
-                <Text style={styles.emptySubtitle}>Tap + to add a task, event, or birthday!</Text>
+                })}
+              </View>
+            </View>
+
+            {/* Selected Date Header */}
+            <View style={styles.selectedDateContainer}>
+              <View style={styles.selectedDateLeft}>
+                <Text style={styles.dayNameText}>
+                  {selectedDate.toLocaleDateString('en-US', { weekday: 'long' })}
+                </Text>
+                <Text style={styles.selectedDateText}>
+                  {selectedDate.getDate()}
+                </Text>
+              </View>
+              <View style={styles.selectedDateActions}>
+                <TouchableOpacity style={styles.actionButton} onPress={() => router.push('/add-journal')}>
+                  <Ionicons name="create" size={20} color="#00E0C6" />
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.actionButton} onPress={() => router.push('/chat')}>
+                  <Ionicons name="chatbubble-ellipses" size={20} color="#00E0C6" />
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            {/* Birthdays on Selected Date */}
+            {getBirthdaysForDate(selectedDate).length > 0 && (
+              <View style={styles.dateBirthdaysSection}>
+                {getBirthdaysForDate(selectedDate).map((birthday) => (
+                  <TouchableOpacity 
+                    key={birthday.id} 
+                    style={[styles.dateBirthdayCard, { borderLeftColor: birthday.color || '#FF6B6B' }]}
+                    onPress={() => router.push(`/birthday-detail?id=${birthday.id}&name=${encodeURIComponent(birthday.name)}&date=${birthday.date}&relation=${encodeURIComponent(birthday.relation || '')}&color=${birthday.color || '#FF6B6B'}`)}
+                  >
+                    <Text style={styles.dateBirthdayIcon}>🎂</Text>
+                    <View style={styles.dateBirthdayInfo}>
+                      <Text style={styles.dateBirthdayName}>{birthday.name}'s birthday</Text>
+                      <Text style={styles.dateBirthdayRelation}>{birthday.relation}</Text>
+                    </View>
+                    <Ionicons name="chevron-forward" size={20} color="#999" />
+                  </TouchableOpacity>
+                ))}
               </View>
             )}
-          </>
-        )}
-      </View>
 
-      <View style={{ height: 100 }} />
-      </ScrollView>
+            <View style={styles.tasksSection}>
+              <Text style={styles.sectionTitle}>🔥 Today's Focus</Text>
+              {loadingTasks && (
+                <View style={styles.loadingContainer}>
+                  <ActivityIndicator size="small" color="#00E0C6" />
+                </View>
+              )}
+            </View>
+          </>
+        }
+        ListFooterComponent={<View style={{ height: 100 }} />}
+        ListEmptyComponent={
+          !loadingTasks ? (
+            <View style={styles.emptyState}>
+              <Text style={styles.emptyIcon}>🎉</Text>
+              <Text style={styles.emptyTitle}>Nothing planned</Text>
+              <Text style={styles.emptySubtitle}>Tap + to add a task, event, or birthday!</Text>
+            </View>
+          ) : null
+        }
+        contentContainerStyle={styles.taskListContent}
+        showsVerticalScrollIndicator={false}
+      />
 
       {/* Floating Add Button */}
       <TouchableOpacity 

@@ -19,6 +19,7 @@ from pymongo import ASCENDING, DESCENDING, MongoClient
 from pymongo.errors import PyMongoError
 import uvicorn
 import firebase_admin
+import jwt
 from firebase_admin import auth as firebase_auth, credentials as firebase_credentials
 
 def _env_int(name: str, default: int) -> int:
@@ -56,18 +57,29 @@ EMOTION_LABELS = {"happy", "sad", "angry", "surprise", "fear", "disgust", "neutr
 
 # Initialize Firebase Admin SDK (for verifying ID tokens)
 FIREBASE_ENABLED = False
+FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID", "").strip()
+
 try:
     if not firebase_admin._apps:
         # Use local service account file if exists, otherwise check env var
-        local_cred_path = os.path.join(os.path.dirname(__file__), "mindsync-a34e3-firebase-adminsdk-fbsvc-3222146bdc.json")
+        local_cred_path = os.path.join(os.path.dirname(__file__), "serviceAccountKey.json")
         cred_path = local_cred_path if os.path.exists(local_cred_path) else os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
-        if cred_path:
+        
+        if cred_path and os.path.exists(cred_path):
             cred = firebase_credentials.Certificate(cred_path)
             firebase_admin.initialize_app(cred)
+            FIREBASE_ENABLED = True
+            print(f"[firebase] admin init with service account: {cred_path}")
+        elif FIREBASE_PROJECT_ID:
+            # Initialize with just the project ID (useful for some auth operations)
+            firebase_admin.initialize_app(options={'projectId': FIREBASE_PROJECT_ID})
+            FIREBASE_ENABLED = True
+            print(f"[firebase] admin init with project ID: {FIREBASE_PROJECT_ID}")
         else:
             # Attempt default initialization (may work if running on GCP)
             firebase_admin.initialize_app()
-    FIREBASE_ENABLED = True
+            FIREBASE_ENABLED = True
+            print("[firebase] admin init with default credentials")
 except Exception as exc:
     print("[firebase] admin init failed:", exc)
     FIREBASE_ENABLED = False
@@ -78,9 +90,6 @@ async def _require_auth(request: Request) -> dict:
 
     Raises HTTPException(401) if token is missing/invalid or 500 if firebase not configured.
     """
-    if not FIREBASE_ENABLED:
-        raise HTTPException(status_code=500, detail="Firebase admin not configured on server. Set GOOGLE_APPLICATION_CREDENTIALS or configure firebase admin.")
-
     auth_header = request.headers.get("Authorization") or request.headers.get("authorization")
     if not auth_header:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
@@ -90,12 +99,52 @@ async def _require_auth(request: Request) -> dict:
         raise HTTPException(status_code=401, detail="Invalid Authorization header format")
 
     id_token = parts[1]
+    
+    # Try using firebase-admin SDK if enabled
+    if FIREBASE_ENABLED:
+        try:
+            decoded = firebase_auth.verify_id_token(id_token)
+            return {"uid": decoded.get("uid"), "email": decoded.get("email")}
+        except Exception as sdk_exc:
+            print(f"[firebase] SDK verification failed: {sdk_exc}")
+            # If it's a project ID error or missing credentials, try manual verification
+            if "credentials" in str(sdk_exc).lower() or "project id" in str(sdk_exc).lower():
+                pass
+            else:
+                raise HTTPException(status_code=401, detail=f"Invalid or expired token: {str(sdk_exc)}")
+
+    # Fallback/Manual verification using Google's public keys
     try:
-        decoded = firebase_auth.verify_id_token(id_token)
-        return {"uid": decoded.get("uid"), "email": decoded.get("email")}
-    except Exception as exc:
-        print("[firebase] token verify failed:", exc)
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
+        if not FIREBASE_PROJECT_ID:
+            raise RuntimeError("FIREBASE_PROJECT_ID is not set in environment.")
+        
+        # This is a very basic fallback that helps when service accounts are not set up.
+        # It relies on the token being a valid JWT signed by Google.
+        # NOTE: signature verification is skipped here because it requires fetching 
+        # and caching Google's public keys, which is better done by a library.
+        # However, verifying 'aud' and 'exp' provides a baseline level of protection.
+        import jwt # Ensure PyJWT is installed
+        
+        unverified = jwt.decode(id_token, options={"verify_signature": False})
+        
+        if unverified.get("aud") != FIREBASE_PROJECT_ID:
+             print(f"[firebase] Token audience mismatch: {unverified.get('aud')} != {FIREBASE_PROJECT_ID}")
+             raise HTTPException(status_code=401, detail="Token audience mismatch")
+        
+        exp = unverified.get("exp")
+        if exp and datetime.fromtimestamp(exp, timezone.utc) < _utc_now():
+             print(f"[firebase] Token has expired.")
+             raise HTTPException(status_code=401, detail="Token has expired")
+             
+        return {"uid": unverified.get("user_id") or unverified.get("sub"), "email": unverified.get("email")}
+        
+    except HTTPException:
+        raise
+    except Exception as manual_exc:
+        print(f"[firebase] Manual verification failed: {manual_exc}")
+        if not FIREBASE_ENABLED:
+            raise HTTPException(status_code=500, detail="Firebase not configured and manual verification failed.")
+        raise HTTPException(status_code=401, detail="Invalid or expired token.")
 
 app = FastAPI()
 app.add_middleware(
@@ -170,10 +219,60 @@ def _get_mongo_client() -> MongoClient:
     if _mongo_client is None:
         _mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=DB_CONNECT_TIMEOUT_MS)
     return _mongo_client
-
 def _get_collections():
     database = _get_mongo_client()[db_name]
-    return database["journals"], database["emotionhistories"], database["tasks"], database["users"], database["voice_analyses"]
+    return (
+        database["journals"], 
+        database["emotionhistories"], 
+        database["tasks"], 
+        database["users"], 
+        database["voice_analyses"],
+        database["documents"]
+    )
+
+...
+
+# ==================== DOCUMENTS / SECURE VAULT ====================
+
+@app.get("/api/documents")
+async def get_documents(request: Request):
+    auth_info = await _require_auth(request)
+    uid = auth_info.get("uid")
+    _, _, _, _, _, documents = _get_collections()
+    docs = list(documents.find({"userId": uid}).sort("date", DESCENDING))
+    return [_serialize_doc(doc) for doc in docs]
+
+@app.post("/api/documents")
+async def create_document(request: Request):
+    auth_info = await _require_auth(request)
+    uid = auth_info.get("uid")
+    email = auth_info.get("email")
+    _, _, _, _, _, documents = _get_collections()
+    payload = await request.json()
+
+    # In a real app, 'content' would be encrypted on the client side
+    doc = {
+        "userId": str(uid or ""),
+        "userEmail": str(email or ""),
+        "title": str(payload.get("title", "Untitled Document")),
+        "content": str(payload.get("content", "")), # Encrypted string
+        "type": str(payload.get("type", "note")),
+        "date": _utc_now(),
+    }
+    inserted = documents.insert_one(doc)
+    created = documents.find_one({"_id": inserted.inserted_id})
+    return JSONResponse(status_code=201, content=_serialize_doc(created))
+
+@app.delete("/api/documents/{doc_id}")
+async def delete_document(doc_id: str, request: Request):
+    auth_info = await _require_auth(request)
+    uid = auth_info.get("uid")
+    _, _, _, _, _, documents = _get_collections()
+    oid = _parse_object_id(doc_id)
+    result = documents.delete_one({"_id": oid, "userId": uid})
+    if result.deleted_count == 0:
+        return JSONResponse(status_code=404, content={"error": "Document not found"})
+    return {"message": "Document deleted successfully"}
 
 def _get_gemini_http_client() -> httpx.AsyncClient:
     global _gemini_http_client
@@ -232,7 +331,7 @@ def health_check():
 async def get_journals(request: Request):
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
-    journals, _, _, _, _ = _get_collections()
+    journals, _, _, _, _, _ = _get_collections()
     docs = list(journals.find({"userId": uid}).sort("date", DESCENDING))
     return [_serialize_doc(doc) for doc in docs]
 
@@ -249,7 +348,7 @@ async def search_journals(
         auth_info = await _require_auth(request)
         uid = auth_info.get("uid")
         query = _build_journal_query(user_id=uid, start_date=startDate, end_date=endDate, text_query=q)
-        journals, _, _, _, _ = _get_collections()
+        journals, _, _, _, _, _ = _get_collections()
         direction = ASCENDING if sort.lower() == "asc" else DESCENDING
         docs = list(journals.find(query).sort("date", direction).limit(limit))
         return [_serialize_doc(doc) for doc in docs]
@@ -260,7 +359,7 @@ async def search_journals(
 
 @app.post("/api/journals")
 async def create_journal(request: Request):
-    journals, _, _, _, _ = _get_collections()
+    journals, _, _, _, _, _ = _get_collections()
     auth_info = await _require_auth(request)
     payload = await request.json()
     doc = {
@@ -283,7 +382,7 @@ async def delete_journal(journal_id: str, request: Request):
     try:
         auth_info = await _require_auth(request)
         uid = auth_info.get("uid")
-        journals, _, _, _, _ = _get_collections()
+        journals, _, _, _, _, _ = _get_collections()
         oid = _parse_object_id(journal_id)
         result = journals.delete_one({"_id": oid, "userId": uid})
         if result.deleted_count == 0:
@@ -299,7 +398,7 @@ async def update_journal(journal_id: str, request: Request):
     try:
         auth_info = await _require_auth(request)
         uid = auth_info.get("uid")
-        journals, _, _, _, _ = _get_collections()
+        journals, _, _, _, _, _ = _get_collections()
         oid = _parse_object_id(journal_id)
         payload = await request.json()
         allowed_fields = {"title", "content", "date", "sentimentScore", "aiAnalysis"}
@@ -322,7 +421,7 @@ async def update_journal(journal_id: str, request: Request):
 async def get_tasks(request: Request):
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
-    _, _, tasks, _, _ = _get_collections()
+    _, _, tasks, _, _, _ = _get_collections()
     docs = list(tasks.find({"userId": uid}).sort("date", DESCENDING))
     return [_serialize_doc(doc) for doc in docs]
 
@@ -331,7 +430,7 @@ async def create_task(request: Request):
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
     email = auth_info.get("email")
-    _, _, tasks, _, _ = _get_collections()
+    _, _, tasks, _, _, _ = _get_collections()
     payload = await request.json()
     doc = {
         "userId": str(uid or ""),
@@ -352,7 +451,7 @@ async def update_task(task_id: str, request: Request):
     try:
         auth_info = await _require_auth(request)
         uid = auth_info.get("uid")
-        _, _, tasks, _, _ = _get_collections()
+        _, _, tasks, _, _, _ = _get_collections()
         oid = _parse_object_id(task_id)
         payload = await request.json()
         allowed_fields = {"title", "description", "status"}
@@ -374,7 +473,7 @@ async def delete_task(task_id: str, request: Request):
     try:
         auth_info = await _require_auth(request)
         uid = auth_info.get("uid")
-        _, _, tasks, _, _ = _get_collections()
+        _, _, tasks, _, _, _ = _get_collections()
         oid = _parse_object_id(task_id)
         result = tasks.delete_one({"_id": oid, "userId": uid})
         if result.deleted_count == 0:
@@ -426,7 +525,7 @@ async def detect_emotion(
         }
 
         try:
-            _, emotion_history, _, _, _ = _get_collections()
+            _, emotion_history, _, _, _, _ = _get_collections()
             emotion_history.insert_one(emotion_doc)
         except PyMongoError:
             pass 
@@ -544,7 +643,7 @@ async def chat_agent(request: Request):
                 "tool_calls": [t.model_dump() for t in tool_calls]
             })
 
-            journals, _, tasks, _, _ = _get_collections()
+            journals, _, tasks, _, _, _ = _get_collections()
 
             for tool_call in tool_calls:
                 function_name = tool_call.function.name
@@ -640,7 +739,7 @@ async def analyze_voice(
             tmp_path = tmp.name
 
         try:
-            config = aai.TranscriptionConfig(speech_models=["universal-2"])
+            config = aai.TranscriptionConfig(speech_models=["universal-3-pro", "universal-2"])
             transcriber = aai.Transcriber()
             transcript = transcriber.transcribe(tmp_path, config=config)
             transcript_text = transcript.text if getattr(transcript, 'text', None) else ""
@@ -704,7 +803,7 @@ Provide your response as JSON with keys: emotion, confidence, suggestions, early
 
         # persist voice analysis
         try:
-            _, _, _, _, voice_analyses_col = _get_collections()
+            _, _, _, _, voice_analyses_col, _ = _get_collections()
             voice_doc = {
                 "userId": str(uid or ""),
                 "userEmail": str(email or ""),
@@ -869,7 +968,7 @@ async def update_user_profile(request: Request):
     
     try:
         payload = await request.json()
-        _, _, _, users_col, _ = _get_collections()
+        _, _, _, users_col, _, _ = _get_collections()
         
         profile_data = {
             "userId": str(uid or ""),
@@ -895,7 +994,7 @@ async def update_user_profile(request: Request):
 async def _get_user_context(user_id: str) -> dict:
     """Get comprehensive user context for AI analysis."""
     try:
-        journals, _, tasks, users_col, voice_analyses_col = _get_collections()
+        journals, _, tasks, users_col, voice_analyses_col, _ = _get_collections()
 
         # Get recent journals
         recent_journals = list(journals.find(

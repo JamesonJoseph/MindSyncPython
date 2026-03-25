@@ -52,8 +52,11 @@ const base64Decode = (str: string): string => {
   return result;
 };
 
+import { getApiBaseUrl } from '../../utils/api';
+
 export interface VaultEntry {
   id: string;
+  _id?: string;
   title: string;
   username: string;
   password: string;
@@ -98,6 +101,34 @@ export function VaultProvider({ children }: { children: ReactNode }) {
       }
       setEncryptionKey(key);
       
+      // Try to load from backend
+      try {
+        const { authFetch } = await import('../../utils/api');
+        const res = await authFetch(`${getApiBaseUrl()}/api/documents`);
+        if (res.ok) {
+          const backendDocs = await res.json();
+          const decryptedEntries = await Promise.all(backendDocs.map(async (doc: any) => {
+            if (doc.type !== 'vault') return null;
+            try {
+              const decryptedData = await decryptData(doc.content, key!);
+              const parsed = JSON.parse(decryptedData);
+              return { ...parsed, _id: doc._id };
+            } catch (e) {
+              return null;
+            }
+          }));
+          const validEntries = decryptedEntries.filter(e => e !== null) as VaultEntry[];
+          if (validEntries.length > 0) {
+            setEntries(validEntries);
+            const encrypted = await encryptData(JSON.stringify(validEntries), key);
+            await AsyncStorage.setItem(STORAGE_KEY, encrypted);
+            return;
+          }
+        }
+      } catch (e) {
+        console.log('Backend vault fetch failed, using local');
+      }
+
       const storedData = await AsyncStorage.getItem(STORAGE_KEY);
       if (storedData) {
         const decrypted = await decryptData(storedData, key);
@@ -151,12 +182,48 @@ export function VaultProvider({ children }: { children: ReactNode }) {
       id: Crypto.randomUUID(),
       createdAt: Date.now(),
     };
-    await saveEntries([newEntry, ...entries]);
+    const updatedEntries = [newEntry, ...entries];
+    setEntries(updatedEntries);
+    
+    try {
+      const encryptedContent = await encryptData(JSON.stringify(newEntry), encryptionKey);
+      const { authFetch } = await import('../../utils/api');
+      const res = await authFetch(`${getApiBaseUrl()}/api/documents`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: newEntry.title,
+          content: encryptedContent,
+          type: 'vault'
+        })
+      });
+      if (res.ok) {
+        const saved = await res.json();
+        setEntries(prev => prev.map(e => e.id === newEntry.id ? { ...e, _id: saved._id } : e));
+      }
+      const encryptedAll = await encryptData(JSON.stringify(updatedEntries), encryptionKey);
+      await AsyncStorage.setItem(STORAGE_KEY, encryptedAll);
+    } catch (e) {
+      console.log('Sync to backend failed', e);
+    }
   };
 
   const deleteEntry = async (id: string) => {
-    const newEntries = entries.filter(e => e.id !== id);
-    await saveEntries(newEntries);
+    const entryToDelete = entries.find(e => e.id === id);
+    const updatedEntries = entries.filter(e => e.id !== id);
+    setEntries(updatedEntries);
+    try {
+      if (entryToDelete?._id) {
+        const { authFetch } = await import('../../utils/api');
+        await authFetch(`${getApiBaseUrl()}/api/documents/${entryToDelete._id}`, {
+          method: 'DELETE'
+        });
+      }
+      const encrypted = await encryptData(JSON.stringify(updatedEntries), encryptionKey);
+      await AsyncStorage.setItem(STORAGE_KEY, encrypted);
+    } catch (e) {
+      console.log('Delete from backend failed', e);
+    }
   };
 
   const updateEntry = async (id: string, updates: Partial<VaultEntry>) => {
@@ -223,6 +290,8 @@ export function VaultProvider({ children }: { children: ReactNode }) {
     </VaultContext.Provider>
   );
 }
+
+export default VaultProvider;
 
 export function useVault() {
   const context = useContext(VaultContext);
