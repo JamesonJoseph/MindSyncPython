@@ -18,7 +18,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { auth } from '../firebaseConfig';
-import { getApiBaseUrl } from '../utils/api';
+import { getApiBaseUrl, parseApiResponse } from '../utils/api';
 
 type Message = {
   id: string;
@@ -167,7 +167,7 @@ export default function ChatScreen() {
         const apiUrl = getApiBaseUrl();
         const { authFetch } = await import('../utils/api');
         const response = await authFetch(`${apiUrl}/api/chat/conversations?limit=5`);
-        const data = await response.json().catch(() => ([]));
+        const data: any = await parseApiResponse<any>(response);
         if (!response.ok) {
           throw new Error(
             typeof data?.error === 'string'
@@ -195,7 +195,7 @@ export default function ChatScreen() {
         const apiUrl = getApiBaseUrl();
         const { authFetch } = await import('../utils/api');
         const response = await authFetch(`${apiUrl}/api/journals/search?limit=5&sort=desc`);
-        const data = await response.json().catch(() => ([]));
+        const data: any = await parseApiResponse<any>(response);
         if (!response.ok) {
           throw new Error(
             typeof data?.error === 'string'
@@ -257,7 +257,7 @@ export default function ChatScreen() {
         const apiUrl = getApiBaseUrl();
         const { authFetch } = await import('../utils/api');
         const response = await authFetch(`${apiUrl}/api/chat/conversations/${conversationId}`);
-        const data = await response.json().catch(() => ({}));
+        const data = await parseApiResponse<any>(response);
 
         if (!response.ok) {
           const message =
@@ -333,7 +333,7 @@ export default function ChatScreen() {
         }),
       });
 
-      const data = await response.json().catch(() => ({}));
+      const data = await parseApiResponse<any>(response);
 
       if (!response.ok) {
         const message =
@@ -433,7 +433,7 @@ export default function ChatScreen() {
           })),
         }),
       });
-      const data = await response.json().catch(() => ({}));
+      const data = await parseApiResponse<any>(response);
 
       if (!response.ok) {
         const message =
@@ -512,7 +512,7 @@ export default function ChatScreen() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ title }),
       });
-      const data = await response.json().catch(() => ({}));
+      const data = await parseApiResponse<any>(response);
       if (!response.ok) {
         const message =
           typeof data?.error === 'string' ? data.error :
@@ -549,7 +549,7 @@ export default function ChatScreen() {
               const response = await authFetch(`${apiUrl}/api/chat/conversations/${conversationId}`, {
                 method: 'DELETE',
               });
-              const data = await response.json().catch(() => ({}));
+              const data = await parseApiResponse<any>(response);
               if (!response.ok) {
                 const message =
                   typeof data?.error === 'string' ? data.error :

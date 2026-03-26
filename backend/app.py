@@ -4,16 +4,18 @@ import json
 import os
 import re
 import aiohttp
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
+from uuid import uuid4
 
 from bson import ObjectId
 from bson.errors import InvalidId
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, Query, Request, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from groq import Groq, BadRequestError
 import httpx
 from pymongo import ASCENDING, DESCENDING, MongoClient
@@ -44,6 +46,8 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
 PORT = int(os.getenv("PORT", "5000"))
 DB_CONNECT_TIMEOUT_MS = int(os.getenv("DB_CONNECT_TIMEOUT_MS", "8000"))
 ANALYZE_TIMEOUT_SECONDS = float(os.getenv("ANALYZE_TIMEOUT_SECONDS", "12"))
+ANALYZE_CACHE_TTL_SECONDS = _env_int("ANALYZE_CACHE_TTL_SECONDS", 900)
+FAST_ANALYSIS_CHAR_LIMIT = _env_int("FAST_ANALYSIS_CHAR_LIMIT", 140)
 
 if not MONGO_URI:
     raise RuntimeError("MONGO_URI is required in environment variables.")
@@ -53,8 +57,10 @@ db_name = os.getenv("MONGO_DB_NAME", "").strip() or db_name_from_uri or "mindsyn
 
 _mongo_client: MongoClient | None = None
 _gemini_http_client: httpx.AsyncClient | None = None
+_journal_analysis_cache: dict[str, tuple[float, str]] = {}
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 EMOTION_LABELS = {"happy", "sad", "angry", "surprise", "fear", "disgust", "neutral"}
+UPLOADS_DIR = Path(__file__).resolve().with_name("uploads")
 
 # Initialize Firebase Admin SDK (for verifying ID tokens)
 FIREBASE_ENABLED = False
@@ -121,8 +127,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.on_event("startup")
+async def startup_event():
+    await asyncio.to_thread(_ensure_indexes)
+
 def _utc_now() -> datetime:
-    """Return current time in UTC (for storage)."""
     return datetime.now(timezone.utc)
 
 def _ist_now() -> datetime:
@@ -222,6 +231,58 @@ def _get_collections():
         database["events"]
     )
 
+def _ensure_indexes() -> None:
+    database = _get_mongo_client()[db_name]
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    database["journals"].create_index([("userId", ASCENDING), ("date", DESCENDING)])
+    database["tasks"].create_index([("userId", ASCENDING), ("date", DESCENDING)])
+    database["chat_conversations"].create_index([("userId", ASCENDING), ("updatedAt", DESCENDING)])
+    database["voice_analyses"].create_index([("userId", ASCENDING), ("date", DESCENDING)])
+
+def _normalize_analysis_content(content: str) -> str:
+    return re.sub(r"\s+", " ", str(content or "").strip()).lower()
+
+def _get_cached_journal_analysis(content: str) -> str | None:
+    cache_key = _normalize_analysis_content(content)
+    if not cache_key:
+        return None
+    cached = _journal_analysis_cache.get(cache_key)
+    if not cached:
+        return None
+    expires_at, value = cached
+    if expires_at < time.time():
+        _journal_analysis_cache.pop(cache_key, None)
+        return None
+    return value
+
+def _cache_journal_analysis(content: str, analysis: str) -> None:
+    cache_key = _normalize_analysis_content(content)
+    if not cache_key or not analysis:
+        return
+    _journal_analysis_cache[cache_key] = (time.time() + ANALYZE_CACHE_TTL_SECONDS, analysis)
+
+def _safe_filename(name: str) -> str:
+    raw_name = Path(str(name or "document.pdf")).name
+    sanitized = re.sub(r"[^A-Za-z0-9._-]", "_", raw_name).strip("._")
+    if not sanitized:
+        return "document.pdf"
+    if not sanitized.lower().endswith(".pdf"):
+        sanitized = f"{sanitized}.pdf"
+    return sanitized
+
+def _resolve_user_upload_path(uid: str, storage_path: str) -> Path:
+    normalized = Path(str(storage_path or "").replace("\\", "/"))
+    parts = [part for part in normalized.parts if part not in ("", ".")]
+    if not parts or any(part == ".." for part in parts):
+        raise HTTPException(status_code=400, detail="Invalid file path")
+    if parts[0] != str(uid):
+        raise HTTPException(status_code=403, detail="File does not belong to the authenticated user")
+    resolved = (UPLOADS_DIR / Path(*parts)).resolve()
+    uploads_root = UPLOADS_DIR.resolve()
+    if uploads_root not in resolved.parents and resolved != uploads_root:
+        raise HTTPException(status_code=400, detail="Invalid file path")
+    return resolved
+
 def _normalize_chat_messages(raw_messages: list | None) -> list[dict]:
     normalized: list[dict] = []
     for item in raw_messages or []:
@@ -269,12 +330,22 @@ def _serialize_conversation_detail(doc: dict) -> dict:
     summary["messages"] = _normalize_chat_messages(doc.get("messages", []))
     return summary
 
+def _request_plain_chat_completion(messages: list[dict]) -> str:
+    if not groq_client:
+        return ""
+    response = groq_client.chat.completions.create(
+        model="llama-3.1-8b-instant",
+        messages=messages,
+        max_tokens=4096,
+    )
+    return response.choices[0].message.content if response.choices else ""
+
 
 @app.get("/api/documents")
 async def get_documents(request: Request):
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
-    _, _, _, _, _, _, documents = _get_collections()
+    _, _, _, _, _, _, documents, _, _ = _get_collections()
     docs = list(documents.find({"userId": uid}).sort("date", DESCENDING))
     return [_serialize_doc(doc) for doc in docs]
 
@@ -284,7 +355,7 @@ async def create_document(request: Request):
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
     email = auth_info.get("email")
-    _, _, _, _, _, _, documents = _get_collections()
+    _, _, _, _, _, _, documents, _, _ = _get_collections()
     payload = await request.json()
 
     doc = {
@@ -299,12 +370,81 @@ async def create_document(request: Request):
     created = documents.find_one({"_id": inserted.inserted_id})
     return JSONResponse(status_code=201, content=_serialize_doc(created))
 
+@app.post("/api/documents/upload-pdf")
+async def upload_document_pdf(request: Request, file: UploadFile = File(...)):
+    auth_info = await _require_auth(request)
+    uid = str(auth_info.get("uid") or "").strip()
+    if not uid:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    content_type = (file.content_type or "").strip().lower()
+    original_name = _safe_filename(file.filename or "document.pdf")
+    if content_type not in {"application/pdf", "application/octet-stream"} and not original_name.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files are supported")
+
+    file_bytes = await file.read()
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="Uploaded PDF is empty")
+    if len(file_bytes) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="PDF must be 10 MB or smaller")
+
+    user_dir = UPLOADS_DIR / uid
+    user_dir.mkdir(parents=True, exist_ok=True)
+    stored_name = f"{uuid4().hex}_{original_name}"
+    stored_path = user_dir / stored_name
+    stored_path.write_bytes(file_bytes)
+
+    storage_path = f"{uid}/{stored_name}"
+    return {
+        "storagePath": storage_path,
+        "fileName": original_name,
+        "mimeType": "application/pdf",
+        "fileSize": len(file_bytes),
+        "downloadUrl": f"/api/documents/file?path={storage_path}",
+    }
+
+@app.get("/api/documents/file")
+async def get_document_pdf(path: str, request: Request):
+    auth_info = await _require_auth(request)
+    uid = str(auth_info.get("uid") or "").strip()
+    target_path = _resolve_user_upload_path(uid, path)
+    if not target_path.exists() or not target_path.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(target_path, media_type="application/pdf", filename=target_path.name)
+
+@app.delete("/api/documents/file")
+async def delete_document_pdf(path: str, request: Request):
+    auth_info = await _require_auth(request)
+    uid = str(auth_info.get("uid") or "").strip()
+    target_path = _resolve_user_upload_path(uid, path)
+    if target_path.exists() and target_path.is_file():
+        target_path.unlink()
+    return {"message": "File deleted successfully"}
+
+@app.put("/api/documents/{doc_id}")
+async def update_document(doc_id: str, request: Request):
+    auth_info = await _require_auth(request)
+    uid = auth_info.get("uid")
+    _, _, _, _, _, _, documents, _, _ = _get_collections()
+    oid = _parse_object_id(doc_id)
+    payload = await request.json()
+    updates = {
+        "title": str(payload.get("title", "")),
+        "content": str(payload.get("content", "")),
+        "type": str(payload.get("type", "secure-doc")),
+    }
+    result = documents.update_one({"_id": oid, "userId": uid}, {"$set": updates})
+    if result.matched_count == 0:
+        return JSONResponse(status_code=404, content={"error": "Document not found"})
+    updated = documents.find_one({"_id": oid})
+    return _serialize_doc(updated)
+
 
 @app.delete("/api/documents/{doc_id}")
 async def delete_document(doc_id: str, request: Request):
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
-    _, _, _, _, _, _, documents = _get_collections()
+    _, _, _, _, _, _, documents, _, _ = _get_collections()
     oid = _parse_object_id(doc_id)
     result = documents.delete_one({"_id": oid, "userId": uid})
     if result.deleted_count == 0:
@@ -418,7 +558,7 @@ def health_check():
 async def get_journals(request: Request):
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
-    journals, _, _, _, _, _ = _get_collections()
+    journals, _, _, _, _, _, _, _, _ = _get_collections()
     docs = list(journals.find({"userId": uid}).sort("date", DESCENDING))
     return [_serialize_doc(doc) for doc in docs]
 
@@ -435,7 +575,7 @@ async def search_journals(
         auth_info = await _require_auth(request)
         uid = auth_info.get("uid")
         query = _build_journal_query(user_id=uid, start_date=startDate, end_date=endDate, text_query=q)
-        journals, _, _, _, _, _ = _get_collections()
+        journals, _, _, _, _, _, _, _, _ = _get_collections()
         direction = ASCENDING if sort.lower() == "asc" else DESCENDING
         docs = list(journals.find(query).sort("date", direction).limit(limit))
         return [_serialize_doc(doc) for doc in docs]
@@ -446,7 +586,7 @@ async def search_journals(
 
 @app.post("/api/journals")
 async def create_journal(request: Request):
-    journals, _, _, _, _, _ = _get_collections()
+    journals, _, _, _, _, _, _, _, _ = _get_collections()
     auth_info = await _require_auth(request)
     payload = await request.json()
     doc = {
@@ -469,7 +609,7 @@ async def delete_journal(journal_id: str, request: Request):
     try:
         auth_info = await _require_auth(request)
         uid = auth_info.get("uid")
-        journals, _, _, _, _, _ = _get_collections()
+        journals, _, _, _, _, _, _, _, _ = _get_collections()
         oid = _parse_object_id(journal_id)
         result = journals.delete_one({"_id": oid, "userId": uid})
         if result.deleted_count == 0:
@@ -485,7 +625,7 @@ async def update_journal(journal_id: str, request: Request):
     try:
         auth_info = await _require_auth(request)
         uid = auth_info.get("uid")
-        journals, _, _, _, _, _ = _get_collections()
+        journals, _, _, _, _, _, _, _, _ = _get_collections()
         oid = _parse_object_id(journal_id)
         payload = await request.json()
         allowed_fields = {"title", "content", "date", "sentimentScore", "aiAnalysis"}
@@ -517,112 +657,45 @@ def _parse_iso_datetime(raw_value: str | None) -> datetime | None:
 
 @app.get("/api/tasks")
 async def get_tasks(request: Request):
-    """Get all tasks for the authenticated user."""
-    try:
-        print("=== GET TASKS STARTED ===")
-        auth_info = await _require_auth(request)
-        uid = auth_info.get("uid")
-        print(f"Getting tasks for user: {uid}")
-        _, _, tasks, _, _, _, _, _ = _get_collections()
-        
-        docs = list(tasks.find({"userId": uid}).sort("event_datetime", ASCENDING))
-        print(f"Found {len(docs)} tasks in DB")
-        
-        serialized = [_serialize_doc(doc) for doc in docs]
-        print(f"Serialized tasks: {serialized}")
-        print("=== GET TASKS COMPLETED ===")
-        return serialized
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Error fetching tasks: {e}")
-        import traceback
-        traceback.print_exc()
-        return JSONResponse(status_code=500, content={"error": "Failed to fetch tasks"})
+    auth_info = await _require_auth(request)
+    uid = auth_info.get("uid")
+    _, _, tasks, _, _, _, _, _, _ = _get_collections()
+    docs = list(tasks.find({"userId": uid}).sort("event_datetime", ASCENDING))
+    return [_serialize_doc(doc) for doc in docs]
 
 @app.post("/api/tasks")
 async def create_task(request: Request):
-    """Create a new task/event/birthday."""
-    print("=== CREATE TASK ENDPOINT REACHED ===")
-    try:
-        print("=== CREATE TASK STARTED ===")
-        
-        # Get auth info first - this is the most likely failure point
-        auth_header = request.headers.get("Authorization")
-        print(f"Auth header present: {bool(auth_header)}")
-        
-        try:
-            auth_info = await _require_auth(request)
-            print(f"Auth OK, uid: {auth_info.get('uid')}")
-        except Exception as auth_err:
-            print(f"Auth error: {auth_err}")
-            import traceback
-            traceback.print_exc()
-            return JSONResponse(status_code=401, content={"error": f"Auth failed: {str(auth_err)}"})
-        
-        uid = auth_info.get("uid")
-        email = auth_info.get("email")
-        
-        try:
-            _, _, tasks, _, _, _, _, _ = _get_collections()
-            print("Collections obtained successfully")
-        except Exception as coll_err:
-            print(f"Collection error: {coll_err}")
-            import traceback
-            traceback.print_exc()
-            return JSONResponse(status_code=500, content={"error": f"DB error: {str(coll_err)}"})
-            
-        payload = await request.json()
-        print('Task payload:', payload)
-        
-        # Parse and validate datetime fields
-        event_datetime = _parse_iso_datetime(payload.get("event_datetime"))
-        if not event_datetime:
-            event_datetime = _utc_now()
-        
-        reminder_datetime = _parse_iso_datetime(payload.get("reminder_datetime"))
-        if not reminder_datetime:
-            # Calculate reminder_datetime from event_datetime and reminder_minutes
-            reminder_minutes = int(payload.get("reminder_minutes", 30))
-            reminder_datetime = event_datetime - __import__('datetime').timedelta(minutes=reminder_minutes)
-        
-        # Build document with proper datetime values
-        doc = {
-            "userId": str(uid or ""),
-            "userEmail": str(email or ""),
-            "id": int(payload.get("id", int(_utc_now().timestamp() * 1000))),  # Client-side ID
-            "title": str(payload.get("title", "Untitled")),
-            "description": str(payload.get("description", "")),
-            "type": str(payload.get("type", "task")),  # event, task, birthday
-            "allDay": bool(payload.get("allDay", True)),
-            "event_datetime": event_datetime,  # Stored as datetime object
-            "reminder_minutes": int(payload.get("reminder_minutes", 30)),
-            "reminder_datetime": reminder_datetime,  # Stored as datetime object
-            "status": str(payload.get("status", "pending")),  # pending, completed
-            "priority": str(payload.get("priority", "medium")),
-            "time": str(payload.get("time", "")),
-            "created_at": _parse_iso_datetime(payload.get("created_at")) or _utc_now(),
-        }
-        
-        inserted = tasks.insert_one(doc)
-        print(f"Inserted task with ID: {inserted.inserted_id}")
-        created = tasks.find_one({"_id": inserted.inserted_id})
-        print(f"Created task: {created}")
-        
-        if not created:
-            return JSONResponse(status_code=500, content={"error": "Failed to create task"})
-        
-        serialized = _serialize_doc(created)
-        print(f"Serialized task: {serialized}")
-        print("=== CREATE TASK COMPLETED ===")
-        return JSONResponse(status_code=201, content=serialized)
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Error creating task: {e}")
-        return JSONResponse(status_code=500, content={"error": f"Failed to create task: {str(e)}"})
->>>>>>> Stashed changes
+    auth_info = await _require_auth(request)
+    uid = auth_info.get("uid")
+    email = auth_info.get("email")
+    _, _, tasks, _, _, _, _, _, _ = _get_collections()
+    payload = await request.json()
+    event_datetime = _parse_iso_datetime(payload.get("event_datetime")) or _utc_now()
+    reminder_minutes = int(payload.get("reminder_minutes", 30))
+    reminder_datetime = _parse_iso_datetime(payload.get("reminder_datetime"))
+    if not reminder_datetime:
+        reminder_datetime = event_datetime - __import__("datetime").timedelta(minutes=reminder_minutes)
+    doc = {
+        "userId": str(uid or ""),
+        "userEmail": str(email or ""),
+        "id": int(payload.get("id", int(_utc_now().timestamp() * 1000))),
+        "title": str(payload.get("title", "Untitled")),
+        "description": str(payload.get("description", "")),
+        "type": str(payload.get("type", "task")),
+        "allDay": bool(payload.get("allDay", True)),
+        "event_datetime": event_datetime,
+        "reminder_minutes": reminder_minutes,
+        "reminder_datetime": reminder_datetime,
+        "status": str(payload.get("status", "pending")),
+        "priority": str(payload.get("priority", "medium")),
+        "time": str(payload.get("time", "")),
+        "created_at": _parse_iso_datetime(payload.get("created_at")) or _utc_now(),
+    }
+    inserted = tasks.insert_one(doc)
+    created = tasks.find_one({"_id": inserted.inserted_id})
+    if not created:
+        return JSONResponse(status_code=500, content={"error": "Failed to create task"})
+    return JSONResponse(status_code=201, content=_serialize_doc(created))
 
 @app.put("/api/tasks/{task_id}")
 async def update_task(task_id: str, request: Request):
@@ -630,7 +703,7 @@ async def update_task(task_id: str, request: Request):
     try:
         auth_info = await _require_auth(request)
         uid = auth_info.get("uid")
-        _, _, tasks, _, _, _, _, _ = _get_collections()
+        _, _, tasks, _, _, _, _, _, _ = _get_collections()
         oid = _parse_object_id(task_id)
         payload = await request.json()
         
@@ -694,7 +767,7 @@ async def delete_task(task_id: str, request: Request):
     try:
         auth_info = await _require_auth(request)
         uid = auth_info.get("uid")
-        _, _, tasks, _, _, _, _, _ = _get_collections()
+        _, _, tasks, _, _, _, _, _, _ = _get_collections()
         oid = _parse_object_id(task_id)
         
         result = tasks.delete_one({"_id": oid, "userId": uid})
@@ -717,7 +790,7 @@ async def delete_task(task_id: str, request: Request):
 async def get_birthdays(request: Request):
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
-    _, _, _, _, _, _, birthdays, _ = _get_collections()
+    _, _, _, _, _, _, _, birthdays, _ = _get_collections()
     docs = list(birthdays.find({"userId": uid}))
     return [_serialize_doc(doc) for doc in docs]
 
@@ -725,7 +798,7 @@ async def get_birthdays(request: Request):
 async def create_birthday(request: Request):
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
-    _, _, _, _, _, _, birthdays, _ = _get_collections()
+    _, _, _, _, _, _, _, birthdays, _ = _get_collections()
     payload = await request.json()
     
     birthday_date = payload.get("date", "")
@@ -759,7 +832,7 @@ async def update_birthday(birthday_id: str, request: Request):
     try:
         auth_info = await _require_auth(request)
         uid = auth_info.get("uid")
-        _, _, _, _, _, _, birthdays, _ = _get_collections()
+        _, _, _, _, _, _, _, birthdays, _ = _get_collections()
         oid = _parse_object_id(birthday_id)
         payload = await request.json()
         
@@ -791,7 +864,7 @@ async def delete_birthday(birthday_id: str, request: Request):
     try:
         auth_info = await _require_auth(request)
         uid = auth_info.get("uid")
-        _, _, _, _, _, _, birthdays, _ = _get_collections()
+        _, _, _, _, _, _, _, birthdays, _ = _get_collections()
         oid = _parse_object_id(birthday_id)
         result = birthdays.delete_one({"_id": oid, "userId": uid})
         if result.deleted_count == 0:
@@ -809,7 +882,7 @@ async def delete_birthday(birthday_id: str, request: Request):
 async def get_events(request: Request, date: str | None = None):
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
-    _, _, _, _, _, _, _, events = _get_collections()
+    _, _, _, _, _, _, _, _, events = _get_collections()
     
     query = {"userId": uid}
     if date:
@@ -822,7 +895,7 @@ async def get_events(request: Request, date: str | None = None):
 async def create_event(request: Request):
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
-    _, _, _, _, _, _, _, events = _get_collections()
+    _, _, _, _, _, _, _, _, events = _get_collections()
     payload = await request.json()
     
     event_date = payload.get("date", "")
@@ -852,7 +925,7 @@ async def update_event(event_id: str, request: Request):
     try:
         auth_info = await _require_auth(request)
         uid = auth_info.get("uid")
-        _, _, _, _, _, _, _, events = _get_collections()
+        _, _, _, _, _, _, _, _, events = _get_collections()
         oid = _parse_object_id(event_id)
         payload = await request.json()
         
@@ -883,7 +956,7 @@ async def delete_event(event_id: str, request: Request):
     try:
         auth_info = await _require_auth(request)
         uid = auth_info.get("uid")
-        _, _, _, _, _, _, _, events = _get_collections()
+        _, _, _, _, _, _, _, _, events = _get_collections()
         oid = _parse_object_id(event_id)
         result = events.delete_one({"_id": oid, "userId": uid})
         if result.deleted_count == 0:
@@ -893,9 +966,6 @@ async def delete_event(event_id: str, request: Request):
         raise
     except Exception:
         return JSONResponse(status_code=500, content={"error": "Failed to delete event"})
->>>>>>> Stashed changes
-
-
 # ==================== AI CAPABILITIES ====================
 
 @app.post("/api/analyze")
@@ -903,16 +973,33 @@ async def analyze_journal(request: Request):
     payload = await request.json()
     content = str(payload.get("content", ""))
     fallback_analysis = _build_local_journal_analysis(content)
+    normalized_content = _normalize_analysis_content(content)
+
+    if not normalized_content:
+        return {"analysis": fallback_analysis}
+
+    cached_analysis = _get_cached_journal_analysis(content)
+    if cached_analysis:
+        return {"analysis": cached_analysis, "cached": True}
+
+    # Short journal entries do not benefit much from a remote LLM call; return
+    # the local analysis immediately to keep the UI responsive.
+    if len(normalized_content) <= FAST_ANALYSIS_CHAR_LIMIT or not groq_client:
+        _cache_journal_analysis(content, fallback_analysis)
+        return {"analysis": fallback_analysis, "fallback": True}
 
     try:
         analysis = await asyncio.wait_for(
             asyncio.to_thread(_request_groq_journal_analysis, content),
-            timeout=ANALYZE_TIMEOUT_SECONDS,
+            timeout=min(ANALYZE_TIMEOUT_SECONDS, 6.0),
         )
-        return {"analysis": analysis or fallback_analysis}
+        final_analysis = analysis or fallback_analysis
+        _cache_journal_analysis(content, final_analysis)
+        return {"analysis": final_analysis}
     except Exception as exc:
         print("[analyze] fallback triggered:", exc)
-        return {"analysis": fallback_analysis}
+        _cache_journal_analysis(content, fallback_analysis)
+        return {"analysis": fallback_analysis, "fallback": True}
 
 @app.post("/api/emotion")
 async def detect_emotion(
@@ -939,7 +1026,7 @@ async def detect_emotion(
         }
 
         try:
-            _, emotion_history, _, _, _, _ = _get_collections()
+            _, emotion_history, _, _, _, _, _, _, _ = _get_collections()
             emotion_history.insert_one(emotion_doc)
         except PyMongoError:
             pass 
@@ -1049,78 +1136,85 @@ async def chat_agent(request: Request):
             # Groq can fail hard on tool-calling for otherwise valid prompts.
             # Fall back to a plain chat completion so the user still gets a reply.
             print("[chat] tool call fallback:", exc)
-            fallback_response = groq_client.chat.completions.create(
-                model="llama-3.1-8b-instant",
-                messages=call_messages,
-                max_tokens=4096
-            )
-            fallback_content = fallback_response.choices[0].message.content if fallback_response.choices else ""
+            fallback_content = _request_plain_chat_completion(call_messages)
             return {"role": "assistant", "content": fallback_content}
 
         response_message = response.choices[0].message
-
         # Check if the model wants to call a function
         tool_calls = response_message.tool_calls
         if tool_calls:
-            call_messages.append({
-                "role": "assistant",
-                "content": response_message.content,
-                "tool_calls": [t.model_dump() for t in tool_calls]
-            })
-
-            journals, _, tasks, _, _, _ = _get_collections()
-
-            for tool_call in tool_calls:
-                function_name = tool_call.function.name
-                function_args = json.loads(tool_call.function.arguments)
-
-                tool_response = ""
-
-                if function_name == "get_tasks":
-                    docs = list(tasks.find({"userId": uid}).sort("date", DESCENDING).limit(10))
-                    tool_response = json.dumps([_serialize_doc(d) for d in docs])
-                elif function_name == "create_task":
-                    doc = {
-                        "userId": str(uid or ""),
-                        "userEmail": str(email or ""),
-                        "title": function_args.get("title", "Untitled Task"),
-                        "description": function_args.get("description", ""),
-                        "status": function_args.get("status", "pending"),
-                        "date": _utc_now(),
-                        "event_datetime": _utc_now(),
-                        "type": "task",
-                        "priority": "medium"
-                    }
-                    inserted = tasks.insert_one(doc)
-                    tool_response = json.dumps({"status": "success", "taskId": str(inserted.inserted_id)})
-                elif function_name == "update_task":
-                    try:
-                        oid = _parse_object_id(function_args.get("task_id"))
-                        tasks.update_one({"_id": oid, "userId": uid}, {"$set": {"status": function_args.get("status")}})
-                        tool_response = json.dumps({"status": "success"})
-                    except:
-                        tool_response = json.dumps({"status": "error", "message": "Invalid task ID"})
-                elif function_name == "get_journals":
-                    docs = list(journals.find({"userId": uid}).sort("date", DESCENDING).limit(5))
-                    tool_response = json.dumps([_serialize_doc(d) for d in docs])
-                else:
-                    tool_response = json.dumps({"error": "Unknown function"})
-
+            try:
                 call_messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "name": function_name,
-                    "content": tool_response
+                    "role": "assistant",
+                    "content": response_message.content,
+                    "tool_calls": [t.model_dump() for t in tool_calls]
                 })
 
-            # Call the model again with the function response
-            second_response = groq_client.chat.completions.create(
-                model="llama-3.1-8b-instant",
-                messages=call_messages,
-                max_tokens=4096
-            )
-            assistant_content = second_response.choices[0].message.content if second_response.choices else ""
-            return {"role": "assistant", "content": assistant_content}
+                journals, _, tasks, _, _, _, _, _, _ = _get_collections()
+
+                for tool_call in tool_calls:
+                    function_name = tool_call.function.name
+                    try:
+                        function_args = json.loads(tool_call.function.arguments or "{}")
+                    except json.JSONDecodeError:
+                        function_args = {}
+
+                    tool_response = ""
+
+                    if function_name == "get_tasks":
+                        docs = list(tasks.find({"userId": uid}).sort("event_datetime", ASCENDING).limit(10))
+                        tool_response = json.dumps([_serialize_doc(d) for d in docs])
+                    elif function_name == "create_task":
+                        event_datetime = _parse_iso_datetime(function_args.get("event_datetime")) or _utc_now()
+                        reminder_minutes = int(function_args.get("reminder_minutes", 30))
+                        reminder_datetime = _parse_iso_datetime(function_args.get("reminder_datetime"))
+                        if not reminder_datetime:
+                            reminder_datetime = event_datetime - __import__("datetime").timedelta(minutes=reminder_minutes)
+
+                        doc = {
+                            "userId": str(uid or ""),
+                            "userEmail": str(email or ""),
+                            "id": int(function_args.get("id", int(_utc_now().timestamp() * 1000))),
+                            "title": str(function_args.get("title", "Untitled")),
+                            "description": str(function_args.get("description", "")),
+                            "type": str(function_args.get("type", "task")),
+                            "allDay": bool(function_args.get("allDay", True)),
+                            "event_datetime": event_datetime,
+                            "reminder_minutes": reminder_minutes,
+                            "reminder_datetime": reminder_datetime,
+                            "status": str(function_args.get("status", "pending")),
+                            "priority": str(function_args.get("priority", "medium")),
+                            "time": str(function_args.get("time", "")),
+                            "created_at": _utc_now(),
+                        }
+                        inserted = tasks.insert_one(doc)
+                        tool_response = json.dumps({"status": "success", "taskId": str(inserted.inserted_id)})
+                    elif function_name == "update_task":
+                        try:
+                            oid = _parse_object_id(function_args.get("task_id"))
+                            tasks.update_one({"_id": oid, "userId": uid}, {"$set": {"status": function_args.get("status")}})
+                            tool_response = json.dumps({"status": "success"})
+                        except Exception:
+                            tool_response = json.dumps({"status": "error", "message": "Invalid task ID"})
+                    elif function_name == "get_journals":
+                        docs = list(journals.find({"userId": uid}).sort("date", DESCENDING).limit(5))
+                        tool_response = json.dumps([_serialize_doc(d) for d in docs])
+                    else:
+                        tool_response = json.dumps({"error": "Unknown function"})
+
+                    call_messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "name": function_name,
+                        "content": tool_response
+                    })
+
+                assistant_content = _request_plain_chat_completion(call_messages)
+                return {"role": "assistant", "content": assistant_content}
+            except Exception as exc:
+                print("[chat] tool execution fallback:", exc)
+                fallback_content = _request_plain_chat_completion(call_messages[:1] + messages)
+                return {"role": "assistant", "content": fallback_content}
 
         assistant_content = response_message.content or ""
         return {"role": "assistant", "content": assistant_content}
@@ -1146,7 +1240,7 @@ async def save_chat_conversation(request: Request):
     context_payload = payload.get("context")
     context = context_payload if isinstance(context_payload, dict) else {}
 
-    _, _, _, _, _, chat_conversations = _get_collections()
+    _, _, _, _, _, chat_conversations, _, _, _ = _get_collections()
 
     conversation_doc = {
         "userId": str(uid or ""),
@@ -1189,7 +1283,7 @@ async def list_chat_conversations(
 ):
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
-    _, _, _, _, _, chat_conversations = _get_collections()
+    _, _, _, _, _, chat_conversations, _, _, _ = _get_collections()
     docs = list(chat_conversations.find({"userId": uid}).sort("updatedAt", DESCENDING).limit(limit))
     return [_serialize_conversation_summary(doc) for doc in docs]
 
@@ -1197,7 +1291,7 @@ async def list_chat_conversations(
 async def get_chat_conversation(conversation_id: str, request: Request):
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
-    _, _, _, _, _, chat_conversations = _get_collections()
+    _, _, _, _, _, chat_conversations, _, _, _ = _get_collections()
     try:
         oid = _parse_object_id(conversation_id)
     except ValueError:
@@ -1212,7 +1306,7 @@ async def get_chat_conversation(conversation_id: str, request: Request):
 async def update_chat_conversation(conversation_id: str, request: Request):
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
-    _, _, _, _, _, chat_conversations = _get_collections()
+    _, _, _, _, _, chat_conversations, _, _, _ = _get_collections()
     try:
         oid = _parse_object_id(conversation_id)
     except ValueError:
@@ -1239,7 +1333,7 @@ async def update_chat_conversation(conversation_id: str, request: Request):
 async def delete_chat_conversation(conversation_id: str, request: Request):
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
-    _, _, _, _, _, chat_conversations = _get_collections()
+    _, _, _, _, _, chat_conversations, _, _, _ = _get_collections()
     try:
         oid = _parse_object_id(conversation_id)
     except ValueError:
@@ -1353,7 +1447,7 @@ Provide your response as JSON with keys: emotion, confidence, suggestions, early
 
         # persist voice analysis
         try:
-            _, _, _, _, voice_analyses_col, _ = _get_collections()
+            _, _, _, _, voice_analyses_col, _, _, _, _ = _get_collections()
             voice_doc = {
                 "userId": str(uid or ""),
                 "userEmail": str(email or ""),
@@ -1518,7 +1612,7 @@ async def update_user_profile(request: Request):
     
     try:
         payload = await request.json()
-        _, _, _, users_col, _, _ = _get_collections()
+        _, _, _, users_col, _, _, _, _, _ = _get_collections()
         
         profile_data = {
             "userId": str(uid or ""),
@@ -1544,7 +1638,7 @@ async def update_user_profile(request: Request):
 async def _get_user_context(user_id: str) -> dict:
     """Get comprehensive user context for AI analysis."""
     try:
-        journals, _, tasks, users_col, voice_analyses_col, _ = _get_collections()
+        journals, _, tasks, users_col, voice_analyses_col, _, _, _, _ = _get_collections()
 
         # Get recent journals
         recent_journals = list(journals.find(

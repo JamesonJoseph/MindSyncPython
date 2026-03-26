@@ -14,7 +14,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import Animated, { useAnimatedStyle, withTiming, useSharedValue } from 'react-native-reanimated';
-import { activateKeepAwake, deactivateKeepAwake } from 'expo-keep-awake';
+import { activateKeepAwakeAsync, deactivateKeepAwakeAsync } from 'expo-keep-awake';
 
 import { useAudioRecorder, RecordingPresets, useAudioRecorderState, requestRecordingPermissionsAsync, setAudioModeAsync } from 'expo-audio';
 import * as Speech from 'expo-speech';
@@ -112,8 +112,12 @@ export default function AvatarScreen() {
       }
     });
     playerA.play();
-    activateKeepAwake();
-    return () => { deactivateKeepAwake(); };
+    let isMounted = true;
+    activateKeepAwakeAsync().catch(() => {});
+    return () => {
+      isMounted = false;
+      deactivateKeepAwakeAsync().catch(() => {});
+    };
   }, [playerA, playerB]);
 
   const animatedStyleA = useAnimatedStyle(() => ({

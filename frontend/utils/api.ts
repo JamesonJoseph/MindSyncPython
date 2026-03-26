@@ -33,8 +33,8 @@ function getExpoHostApiBaseUrl(): string | null {
 
 export function getApiBaseUrlCandidates(): string[] {
   const candidates = [
-    normalizeBaseUrl(process.env.EXPO_PUBLIC_API_URL),
     getExpoHostApiBaseUrl(),
+    normalizeBaseUrl(process.env.EXPO_PUBLIC_API_URL),
   ].filter((value): value is string => Boolean(value));
 
   return [...new Set(candidates)];
@@ -85,7 +85,9 @@ export async function authFetch(input: string, init: RequestInit = {}) {
   try {
     const user = auth.currentUser;
     if (user) {
-      const token = await user.getIdToken();
+      // Use the cached token first to avoid a network round-trip on every
+      // request. Firebase refreshes it only when required.
+      const token = await user.getIdToken(false);
       if (token) headers['Authorization'] = `Bearer ${token}`;
       headers['X-User-Id'] = user.uid;
       if (user.email) {
@@ -107,7 +109,17 @@ export async function authFetch(input: string, init: RequestInit = {}) {
 
   for (const url of retryUrls) {
     try {
-      return await fetch(url, opts);
+      const response = await fetch(url, opts);
+      const contentType = response.headers.get('content-type') || '';
+
+      // Retry alternate base URLs when the first endpoint returns a non-JSON
+      // server error page or plain-text error body.
+      if (!response.ok && !/application\/json/i.test(contentType) && retryUrls.length > 1) {
+        lastError = new Error(`Non-JSON error response from ${url}`);
+        continue;
+      }
+
+      return response;
     } catch (error) {
       lastError = error;
       if (!isNetworkError(error)) {
@@ -117,4 +129,21 @@ export async function authFetch(input: string, init: RequestInit = {}) {
   }
 
   throw lastError instanceof Error ? lastError : new Error('Network request failed');
+}
+
+export async function parseApiResponse<T = any>(response: Response): Promise<T> {
+  const rawText = await response.text();
+
+  if (!rawText.trim()) {
+    return {} as T;
+  }
+
+  try {
+    return JSON.parse(rawText) as T;
+  } catch {
+    return {
+      error: rawText.trim(),
+      raw: rawText,
+    } as T;
+  }
 }

@@ -22,7 +22,7 @@ import {
   useAudioRecorderState,
 } from "expo-audio";
 import { auth } from "../firebaseConfig";
-import { getApiBaseUrl } from "../utils/api";
+import { getApiBaseUrl, parseApiResponse } from "../utils/api";
 
 export default function AddJournalScreen() {
   const insets = useSafeAreaInsets();
@@ -93,7 +93,7 @@ export default function AddJournalScreen() {
         body: formData,
       });
 
-      const data = await response.json().catch(() => ({}));
+      const data = await parseApiResponse<any>(response);
       if (!response.ok) {
         const message =
           typeof data?.error === "string" ? data.error :
@@ -204,7 +204,7 @@ export default function AddJournalScreen() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ content: content }),
           });
-          data = await response.json().catch(() => ({}));
+          data = await parseApiResponse<any>(response);
           lastError = null;
           break;
         } catch (error) {
@@ -260,9 +260,8 @@ export default function AddJournalScreen() {
     setIsSaving(true);
     
     try {
-      const apiUrl = getApiBaseUrl();
       const method = existingId ? "PUT" : "POST";
-      const endpoint = existingId ? `${apiUrl}/api/journals/${existingId}` : `${apiUrl}/api/journals`;
+      const endpoint = existingId ? `/api/journals/${existingId}` : `/api/journals`;
 
       // 2. Prepare payload including email and title
       const { authFetch } = await import('../utils/api');
@@ -277,16 +276,25 @@ export default function AddJournalScreen() {
           aiAnalysis: analysis, 
         }),
       });
+      const data = await parseApiResponse<any>(response);
 
       if (response.ok) {
         Alert.alert("Success!", existingId ? "Journal updated!" : "Journal saved!");
         router.replace("/journal" as any); 
       } else {
-        Alert.alert("Error", "Failed to save to database.");
+        const message =
+          typeof data?.error === "string" ? data.error :
+          typeof data?.detail === "string" ? data.detail :
+          "Failed to save to database.";
+        Alert.alert("Error", message);
       }
     } catch (error) {
       console.warn("Save journal failed", error);
-      Alert.alert("Network Error", "Check your server connection.");
+      const message =
+        error instanceof Error && /timed out/i.test(error.message)
+          ? "The save request timed out. Check that the backend is reachable on port 5000."
+          : "Check your server connection.";
+      Alert.alert("Network Error", message);
     } finally {
       setIsSaving(false);
     }

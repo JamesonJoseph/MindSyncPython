@@ -15,7 +15,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { getApiBaseUrl } from '../utils/api';
+import { getApiBaseUrl, parseApiResponse } from '../utils/api';
 
 type ConversationSummary = {
   _id: string;
@@ -58,7 +58,7 @@ export default function ChatHistoryScreen() {
       const apiUrl = getApiBaseUrl();
       const { authFetch } = await import('../utils/api');
       const response = await authFetch(`${apiUrl}/api/chat/conversations`);
-      const data = await response.json().catch(() => ([]));
+      const data: any = await parseApiResponse<any>(response);
 
       if (!response.ok) {
         const message =
@@ -143,7 +143,7 @@ export default function ChatHistoryScreen() {
               const response = await authFetch(`${apiUrl}/api/chat/conversations/${item._id}`, {
                 method: 'DELETE',
               });
-              const data = await response.json().catch(() => ({}));
+              const data = await parseApiResponse<any>(response);
               if (!response.ok) {
                 const message =
                   typeof data?.error === 'string' ? data.error :
@@ -187,7 +187,7 @@ export default function ChatHistoryScreen() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ title }),
       });
-      const data = await response.json().catch(() => ({}));
+      const data = await parseApiResponse<any>(response);
       if (!response.ok) {
         const message =
           typeof data?.error === 'string' ? data.error :

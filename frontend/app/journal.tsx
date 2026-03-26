@@ -14,7 +14,7 @@ import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useRouter, Stack } from "expo-router";
 import { auth } from "../firebaseConfig";
-import { getApiBaseUrl } from "../utils/api";
+import { getApiBaseUrl, parseApiResponse } from "../utils/api";
 
 // --- Mock Heatmap Functions ---
 const generateMockHeatmapData = () => {
@@ -68,7 +68,7 @@ export default function JournalScreen() {
       const apiUrl = getApiBaseUrl();
       const { authFetch } = await import('../utils/api');
       const response = await authFetch(`${apiUrl}/api/journals?userId=${user.uid}`);
-      const data = await response.json();
+      const data: any = await parseApiResponse<any>(response);
       
       if (!response.ok) {
         const message =
