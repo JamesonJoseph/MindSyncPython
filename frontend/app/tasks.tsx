@@ -172,23 +172,34 @@ export default function TasksScreen() {
       const dateString = date.toISOString().split('T')[0]; // YYYY-MM-DD
       const { authFetch } = await import('../utils/api');
       const res = await authFetch(`${getApiBaseUrl()}/api/tasks?userId=${userId}&date=${dateString}`);
-      
-      if (res.ok) {
-        const data = await res.json();
-        // Ensure data is properly typed as Task[]
-        const typedData: Task[] = data.map((item: any) => ({
-          _id: item._id || '',
-          title: item.title || '',
-          description: item.description || '',
-          status: item.status === 'completed' ? 'completed' : 'pending'
-        }));
-        setTasksByDate(prev => ({
-          ...prev,
-          [dateString]: typedData
-        }));
+      const data = await res.json();
+
+      if (!res.ok) {
+        const message =
+          typeof data?.error === 'string' ? data.error :
+          typeof data?.detail === 'string' ? data.detail :
+          'Failed to fetch tasks.';
+        throw new Error(message);
       }
+
+      const items = Array.isArray(data) ? data : [];
+      const typedData: Task[] = items.map((item: any) => ({
+        _id: item._id || '',
+        title: item.title || '',
+        description: item.description || '',
+        status: item.status === 'completed' ? 'completed' : 'pending'
+      }));
+      setTasksByDate(prev => ({
+        ...prev,
+        [dateString]: typedData
+      }));
     } catch (error) {
       console.log('Error fetching tasks for date', error);
+      const dateString = date.toISOString().split('T')[0];
+      setTasksByDate(prev => ({
+        ...prev,
+        [dateString]: []
+      }));
     } finally {
       setLoadingTasks(false);
     }

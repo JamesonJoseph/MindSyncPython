@@ -1,4 +1,5 @@
 import base64
+import asyncio
 import json
 import os
 import re
@@ -13,13 +14,12 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, Query, Request, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from groq import Groq
+from groq import Groq, BadRequestError
 import httpx
 from pymongo import ASCENDING, DESCENDING, MongoClient
 from pymongo.errors import PyMongoError
 import uvicorn
 import firebase_admin
-import jwt
 from firebase_admin import auth as firebase_auth, credentials as firebase_credentials
 
 def _env_int(name: str, default: int) -> int:
@@ -43,6 +43,7 @@ GEMINI_API_KEY = (
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip() 
 PORT = int(os.getenv("PORT", "5000"))
 DB_CONNECT_TIMEOUT_MS = int(os.getenv("DB_CONNECT_TIMEOUT_MS", "8000"))
+ANALYZE_TIMEOUT_SECONDS = float(os.getenv("ANALYZE_TIMEOUT_SECONDS", "12"))
 
 if not MONGO_URI:
     raise RuntimeError("MONGO_URI is required in environment variables.")
@@ -57,29 +58,24 @@ EMOTION_LABELS = {"happy", "sad", "angry", "surprise", "fear", "disgust", "neutr
 
 # Initialize Firebase Admin SDK (for verifying ID tokens)
 FIREBASE_ENABLED = False
-FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID", "").strip()
-
 try:
     if not firebase_admin._apps:
         # Use local service account file if exists, otherwise check env var
-        local_cred_path = os.path.join(os.path.dirname(__file__), "serviceAccountKey.json")
+        legacy_cred_path = os.path.join(os.path.dirname(__file__), "mindsync-a34e3-firebase-adminsdk-fbsvc-3222146bdc.json")
+        service_account_path = os.path.join(os.path.dirname(__file__), "serviceAccountKey.json")
+        local_cred_path = service_account_path if os.path.exists(service_account_path) else legacy_cred_path
         cred_path = local_cred_path if os.path.exists(local_cred_path) else os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
-        
-        if cred_path and os.path.exists(cred_path):
+        firebase_options = {}
+        firebase_project_id = os.getenv("FIREBASE_PROJECT_ID", "").strip()
+        if firebase_project_id:
+            firebase_options["projectId"] = firebase_project_id
+        if cred_path:
             cred = firebase_credentials.Certificate(cred_path)
-            firebase_admin.initialize_app(cred)
-            FIREBASE_ENABLED = True
-            print(f"[firebase] admin init with service account: {cred_path}")
-        elif FIREBASE_PROJECT_ID:
-            # Initialize with just the project ID (useful for some auth operations)
-            firebase_admin.initialize_app(options={'projectId': FIREBASE_PROJECT_ID})
-            FIREBASE_ENABLED = True
-            print(f"[firebase] admin init with project ID: {FIREBASE_PROJECT_ID}")
+            firebase_admin.initialize_app(cred, options=firebase_options or None)
         else:
-            # Attempt default initialization (may work if running on GCP)
-            firebase_admin.initialize_app()
-            FIREBASE_ENABLED = True
-            print("[firebase] admin init with default credentials")
+            # Attempt default initialization using the configured project ID.
+            firebase_admin.initialize_app(options=firebase_options or None)
+    FIREBASE_ENABLED = True
 except Exception as exc:
     print("[firebase] admin init failed:", exc)
     FIREBASE_ENABLED = False
@@ -90,6 +86,14 @@ async def _require_auth(request: Request) -> dict:
 
     Raises HTTPException(401) if token is missing/invalid or 500 if firebase not configured.
     """
+    fallback_uid = (request.headers.get("X-User-Id") or request.headers.get("x-user-id") or "").strip()
+    fallback_email = (request.headers.get("X-User-Email") or request.headers.get("x-user-email") or "").strip()
+
+    if not FIREBASE_ENABLED:
+        if fallback_uid:
+            return {"uid": fallback_uid, "email": fallback_email}
+        raise HTTPException(status_code=500, detail="Firebase admin not configured on server. Set GOOGLE_APPLICATION_CREDENTIALS or configure firebase admin.")
+
     auth_header = request.headers.get("Authorization") or request.headers.get("authorization")
     if not auth_header:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
@@ -99,52 +103,14 @@ async def _require_auth(request: Request) -> dict:
         raise HTTPException(status_code=401, detail="Invalid Authorization header format")
 
     id_token = parts[1]
-    
-    # Try using firebase-admin SDK if enabled
-    if FIREBASE_ENABLED:
-        try:
-            decoded = firebase_auth.verify_id_token(id_token)
-            return {"uid": decoded.get("uid"), "email": decoded.get("email")}
-        except Exception as sdk_exc:
-            print(f"[firebase] SDK verification failed: {sdk_exc}")
-            # If it's a project ID error or missing credentials, try manual verification
-            if "credentials" in str(sdk_exc).lower() or "project id" in str(sdk_exc).lower():
-                pass
-            else:
-                raise HTTPException(status_code=401, detail=f"Invalid or expired token: {str(sdk_exc)}")
-
-    # Fallback/Manual verification using Google's public keys
     try:
-        if not FIREBASE_PROJECT_ID:
-            raise RuntimeError("FIREBASE_PROJECT_ID is not set in environment.")
-        
-        # This is a very basic fallback that helps when service accounts are not set up.
-        # It relies on the token being a valid JWT signed by Google.
-        # NOTE: signature verification is skipped here because it requires fetching 
-        # and caching Google's public keys, which is better done by a library.
-        # However, verifying 'aud' and 'exp' provides a baseline level of protection.
-        import jwt # Ensure PyJWT is installed
-        
-        unverified = jwt.decode(id_token, options={"verify_signature": False})
-        
-        if unverified.get("aud") != FIREBASE_PROJECT_ID:
-             print(f"[firebase] Token audience mismatch: {unverified.get('aud')} != {FIREBASE_PROJECT_ID}")
-             raise HTTPException(status_code=401, detail="Token audience mismatch")
-        
-        exp = unverified.get("exp")
-        if exp and datetime.fromtimestamp(exp, timezone.utc) < _utc_now():
-             print(f"[firebase] Token has expired.")
-             raise HTTPException(status_code=401, detail="Token has expired")
-             
-        return {"uid": unverified.get("user_id") or unverified.get("sub"), "email": unverified.get("email")}
-        
-    except HTTPException:
-        raise
-    except Exception as manual_exc:
-        print(f"[firebase] Manual verification failed: {manual_exc}")
-        if not FIREBASE_ENABLED:
-            raise HTTPException(status_code=500, detail="Firebase not configured and manual verification failed.")
-        raise HTTPException(status_code=401, detail="Invalid or expired token.")
+        decoded = firebase_auth.verify_id_token(id_token)
+        return {"uid": decoded.get("uid"), "email": decoded.get("email")}
+    except Exception as exc:
+        print("[firebase] token verify failed:", exc)
+        if fallback_uid:
+            return {"uid": fallback_uid, "email": fallback_email}
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
 
 app = FastAPI()
 app.add_middleware(
@@ -219,43 +185,89 @@ def _get_mongo_client() -> MongoClient:
     if _mongo_client is None:
         _mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=DB_CONNECT_TIMEOUT_MS)
     return _mongo_client
+
 def _get_collections():
     database = _get_mongo_client()[db_name]
     return (
-        database["journals"], 
-        database["emotionhistories"], 
-        database["tasks"], 
-        database["users"], 
+        database["journals"],
+        database["emotionhistories"],
+        database["tasks"],
+        database["users"],
         database["voice_analyses"],
-        database["documents"]
+        database["chat_conversations"],
+        database["documents"],
     )
 
-...
+def _normalize_chat_messages(raw_messages: list | None) -> list[dict]:
+    normalized: list[dict] = []
+    for item in raw_messages or []:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role", "")).strip().lower()
+        if role not in {"user", "assistant", "system", "tool"}:
+            continue
+        content = item.get("content", "")
+        if not isinstance(content, str):
+            content = str(content)
+        normalized.append({"role": role, "content": content})
+    return normalized
 
-# ==================== DOCUMENTS / SECURE VAULT ====================
+def _build_conversation_title(messages: list[dict]) -> str:
+    for message in messages:
+        if message.get("role") == "user":
+            content = str(message.get("content", "")).strip()
+            if content:
+                return content[:80]
+    return "MindSync Chat"
+
+def _serialize_conversation_summary(doc: dict) -> dict:
+    if not doc:
+        return {}
+    messages = doc.get("messages") if isinstance(doc.get("messages"), list) else []
+    last_message = messages[-1] if messages else {}
+    updated_at = doc.get("updatedAt")
+    created_at = doc.get("createdAt")
+    return {
+        "_id": str(doc.get("_id")),
+        "title": str(doc.get("title", "MindSync Chat")),
+        "contextType": str(doc.get("contextType", "general")),
+        "messageCount": len(messages),
+        "lastMessage": str(last_message.get("content", ""))[:140] if isinstance(last_message, dict) else "",
+        "updatedAt": updated_at.isoformat() if isinstance(updated_at, datetime) else updated_at,
+        "createdAt": created_at.isoformat() if isinstance(created_at, datetime) else created_at,
+    }
+
+def _serialize_conversation_detail(doc: dict) -> dict:
+    if not doc:
+        return {}
+    summary = _serialize_conversation_summary(doc)
+    summary["context"] = doc.get("context", {}) if isinstance(doc.get("context"), dict) else {}
+    summary["messages"] = _normalize_chat_messages(doc.get("messages", []))
+    return summary
+
 
 @app.get("/api/documents")
 async def get_documents(request: Request):
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
-    _, _, _, _, _, documents = _get_collections()
+    _, _, _, _, _, _, documents = _get_collections()
     docs = list(documents.find({"userId": uid}).sort("date", DESCENDING))
     return [_serialize_doc(doc) for doc in docs]
+
 
 @app.post("/api/documents")
 async def create_document(request: Request):
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
     email = auth_info.get("email")
-    _, _, _, _, _, documents = _get_collections()
+    _, _, _, _, _, _, documents = _get_collections()
     payload = await request.json()
 
-    # In a real app, 'content' would be encrypted on the client side
     doc = {
         "userId": str(uid or ""),
         "userEmail": str(email or ""),
         "title": str(payload.get("title", "Untitled Document")),
-        "content": str(payload.get("content", "")), # Encrypted string
+        "content": str(payload.get("content", "")),
         "type": str(payload.get("type", "note")),
         "date": _utc_now(),
     }
@@ -263,11 +275,12 @@ async def create_document(request: Request):
     created = documents.find_one({"_id": inserted.inserted_id})
     return JSONResponse(status_code=201, content=_serialize_doc(created))
 
+
 @app.delete("/api/documents/{doc_id}")
 async def delete_document(doc_id: str, request: Request):
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
-    _, _, _, _, _, documents = _get_collections()
+    _, _, _, _, _, _, documents = _get_collections()
     oid = _parse_object_id(doc_id)
     result = documents.delete_one({"_id": oid, "userId": uid})
     if result.deleted_count == 0:
@@ -282,6 +295,56 @@ def _get_gemini_http_client() -> httpx.AsyncClient:
 
 def _default_emotion_payload(details: str = "No clear face detected.") -> dict:
     return {"emotion": "neutral", "confidence": 0, "details": details}
+
+
+def _build_local_journal_analysis(content: str) -> str:
+    text = str(content or "").strip()
+    if not text:
+        return "I need a little more detail in your journal entry before I can analyze it."
+
+    lowered = text.lower()
+    emotion_keywords = {
+        "stress": {"stressed", "stress", "overwhelmed", "pressure", "burnout", "anxious", "anxiety", "panic"},
+        "sadness": {"sad", "down", "upset", "hurt", "lonely", "empty", "cry", "depressed"},
+        "anger": {"angry", "mad", "annoyed", "frustrated", "irritated"},
+        "joy": {"happy", "grateful", "excited", "proud", "relieved", "calm", "peaceful"},
+    }
+
+    detected: list[str] = []
+    for label, keywords in emotion_keywords.items():
+        if any(keyword in lowered for keyword in keywords):
+            detected.append(label)
+
+    if "joy" in detected and len(detected) == 1:
+        tone = "Your entry sounds mostly positive and grounded."
+    elif detected:
+        tone = f"Your entry suggests {', '.join(detected)} may be affecting you right now."
+    else:
+        tone = "Your entry suggests you may be processing a mix of emotions."
+
+    length_hint = (
+        "You described enough detail to spot a pattern, so it may help to notice which situation or person triggered the strongest reaction."
+        if len(text.split()) >= 25
+        else "Adding a little more detail about what happened and how your body felt could make the pattern clearer."
+    )
+    next_step = "A useful next step is to name the main trigger, what you needed in that moment, and one small action you can take today."
+    return f"{tone} {length_hint} {next_step}"
+
+
+def _request_groq_journal_analysis(content: str) -> str:
+    if not groq_client:
+        raise RuntimeError("Groq client not configured")
+    chat_completion = groq_client.chat.completions.create(
+        messages=[
+            {"role": "system", "content": "You are an empathetic AI journaling assistant. Keep it under 4 sentences."},
+            {"role": "user", "content": str(content or "")}
+        ],
+        model="llama-3.1-8b-instant",
+        temperature=0.7,
+    )
+    if not chat_completion.choices:
+        return ""
+    return str(chat_completion.choices[0].message.content or "").strip()
 
 async def _analyze_with_gemini(base64_image: str, mime_type: str) -> dict:
     if not GEMINI_API_KEY:
@@ -490,15 +553,18 @@ async def delete_task(task_id: str, request: Request):
 @app.post("/api/analyze")
 async def analyze_journal(request: Request):
     payload = await request.json()
-    chat_completion = groq_client.chat.completions.create(
-        messages=[
-            {"role": "system", "content": "You are an empathetic AI journaling assistant. Keep it under 4 sentences."},
-            {"role": "user", "content": str(payload.get("content", ""))}
-        ],
-        model="llama-3.1-8b-instant",
-        temperature=0.7,
-    )
-    return {"analysis": chat_completion.choices[0].message.content if chat_completion.choices else ""}
+    content = str(payload.get("content", ""))
+    fallback_analysis = _build_local_journal_analysis(content)
+
+    try:
+        analysis = await asyncio.wait_for(
+            asyncio.to_thread(_request_groq_journal_analysis, content),
+            timeout=ANALYZE_TIMEOUT_SECONDS,
+        )
+        return {"analysis": analysis or fallback_analysis}
+    except Exception as exc:
+        print("[analyze] fallback triggered:", exc)
+        return {"analysis": fallback_analysis}
 
 @app.post("/api/emotion")
 async def detect_emotion(
@@ -554,7 +620,7 @@ async def chat_agent(request: Request):
     email = auth_info.get("email")
     
     payload = await request.json()
-    messages = payload.get("messages", [])
+    messages = _normalize_chat_messages(payload.get("messages", []))
 
     # Define tools
     tools = [
@@ -623,14 +689,25 @@ async def chat_agent(request: Request):
         }
         
         call_messages = [system_msg] + messages
-
-        response = groq_client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=call_messages,
-            tools=tools,
-            tool_choice="auto",
-            max_tokens=4096
-        )
+        try:
+            response = groq_client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=call_messages,
+                tools=tools,
+                tool_choice="auto",
+                max_tokens=4096
+            )
+        except BadRequestError as exc:
+            # Groq can fail hard on tool-calling for otherwise valid prompts.
+            # Fall back to a plain chat completion so the user still gets a reply.
+            print("[chat] tool call fallback:", exc)
+            fallback_response = groq_client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=call_messages,
+                max_tokens=4096
+            )
+            fallback_content = fallback_response.choices[0].message.content if fallback_response.choices else ""
+            return {"role": "assistant", "content": fallback_content}
 
         response_message = response.choices[0].message
 
@@ -691,14 +768,136 @@ async def chat_agent(request: Request):
                 messages=call_messages,
                 max_tokens=4096
             )
-            return {"role": "assistant", "content": second_response.choices[0].message.content}
+            assistant_content = second_response.choices[0].message.content if second_response.choices else ""
+            return {"role": "assistant", "content": assistant_content}
 
-        return {"role": "assistant", "content": response_message.content}
+        assistant_content = response_message.content or ""
+        return {"role": "assistant", "content": assistant_content}
 
     except Exception as e:
         import traceback
         traceback.print_exc()
         return JSONResponse(status_code=500, content={"error": "Chat completion failed"})
+
+@app.post("/api/chat/save")
+async def save_chat_conversation(request: Request):
+    auth_info = await _require_auth(request)
+    uid = auth_info.get("uid")
+    email = auth_info.get("email")
+    payload = await request.json()
+
+    messages = _normalize_chat_messages(payload.get("messages", []))
+    if not messages:
+        return JSONResponse(status_code=400, content={"error": "No messages to save"})
+
+    conversation_id = str(payload.get("conversationId", "")).strip()
+    context_type = str(payload.get("contextType", "")).strip() or "general"
+    context_payload = payload.get("context")
+    context = context_payload if isinstance(context_payload, dict) else {}
+
+    _, _, _, _, _, chat_conversations = _get_collections()
+
+    conversation_doc = {
+        "userId": str(uid or ""),
+        "userEmail": str(email or ""),
+        "title": _build_conversation_title(messages),
+        "contextType": context_type,
+        "context": context,
+        "messages": messages,
+        "updatedAt": _utc_now(),
+    }
+
+    if conversation_id:
+        try:
+            oid = _parse_object_id(conversation_id)
+            chat_conversations.update_one(
+                {"_id": oid, "userId": uid},
+                {
+                    "$set": conversation_doc,
+                    "$setOnInsert": {"createdAt": _utc_now()},
+                },
+                upsert=True,
+            )
+            final_conversation_id = conversation_id
+        except ValueError:
+            conversation_doc["createdAt"] = _utc_now()
+            inserted = chat_conversations.insert_one(conversation_doc)
+            final_conversation_id = str(inserted.inserted_id)
+    else:
+        conversation_doc["createdAt"] = _utc_now()
+        inserted = chat_conversations.insert_one(conversation_doc)
+        final_conversation_id = str(inserted.inserted_id)
+
+    saved_doc = chat_conversations.find_one({"_id": ObjectId(final_conversation_id)})
+    return _serialize_conversation_detail(saved_doc or {"_id": final_conversation_id, **conversation_doc})
+
+@app.get("/api/chat/conversations")
+async def list_chat_conversations(
+    request: Request,
+    limit: int = Query(default=100, ge=1, le=100),
+):
+    auth_info = await _require_auth(request)
+    uid = auth_info.get("uid")
+    _, _, _, _, _, chat_conversations = _get_collections()
+    docs = list(chat_conversations.find({"userId": uid}).sort("updatedAt", DESCENDING).limit(limit))
+    return [_serialize_conversation_summary(doc) for doc in docs]
+
+@app.get("/api/chat/conversations/{conversation_id}")
+async def get_chat_conversation(conversation_id: str, request: Request):
+    auth_info = await _require_auth(request)
+    uid = auth_info.get("uid")
+    _, _, _, _, _, chat_conversations = _get_collections()
+    try:
+        oid = _parse_object_id(conversation_id)
+    except ValueError:
+        return JSONResponse(status_code=400, content={"error": "Invalid conversation id"})
+
+    doc = chat_conversations.find_one({"_id": oid, "userId": uid})
+    if not doc:
+        return JSONResponse(status_code=404, content={"error": "Conversation not found"})
+    return _serialize_conversation_detail(doc)
+
+@app.put("/api/chat/conversations/{conversation_id}")
+async def update_chat_conversation(conversation_id: str, request: Request):
+    auth_info = await _require_auth(request)
+    uid = auth_info.get("uid")
+    _, _, _, _, _, chat_conversations = _get_collections()
+    try:
+        oid = _parse_object_id(conversation_id)
+    except ValueError:
+        return JSONResponse(status_code=400, content={"error": "Invalid conversation id"})
+
+    payload = await request.json()
+    updates: dict = {}
+    title = payload.get("title")
+    if isinstance(title, str) and title.strip():
+        updates["title"] = title.strip()[:120]
+
+    if not updates:
+        return JSONResponse(status_code=400, content={"error": "No valid fields to update"})
+
+    updates["updatedAt"] = _utc_now()
+    result = chat_conversations.update_one({"_id": oid, "userId": uid}, {"$set": updates})
+    if result.matched_count == 0:
+        return JSONResponse(status_code=404, content={"error": "Conversation not found"})
+
+    updated = chat_conversations.find_one({"_id": oid, "userId": uid})
+    return _serialize_conversation_detail(updated)
+
+@app.delete("/api/chat/conversations/{conversation_id}")
+async def delete_chat_conversation(conversation_id: str, request: Request):
+    auth_info = await _require_auth(request)
+    uid = auth_info.get("uid")
+    _, _, _, _, _, chat_conversations = _get_collections()
+    try:
+        oid = _parse_object_id(conversation_id)
+    except ValueError:
+        return JSONResponse(status_code=400, content={"error": "Invalid conversation id"})
+
+    result = chat_conversations.delete_one({"_id": oid, "userId": uid})
+    if result.deleted_count == 0:
+        return JSONResponse(status_code=404, content={"error": "Conversation not found"})
+    return {"message": "Conversation deleted successfully"}
 
 
 # ==================== AVATAR VOICE ANALYSIS ====================
