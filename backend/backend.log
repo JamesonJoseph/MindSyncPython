@@ -1,67 +1,13 @@
-/home/karthikkrishnan24/Karthik_files/Miniproject/MindSync-App/backend/app.py:174: DeprecationWarning: 
+/home/karthikkrishnan24/MindSync-App/backend/app.py:339: DeprecationWarning: 
         on_event is deprecated, use lifespan event handlers instead.
 
         Read more about it in the
         [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
         
   @app.on_event("shutdown")
-INFO:     Started server process [11814]
+INFO:     Started server process [28008]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
 INFO:     Uvicorn running on http://0.0.0.0:5000 (Press CTRL+C to quit)
-INFO:     127.0.0.1:52868 - "GET /health HTTP/1.1" 200 OK
-Traceback (most recent call last):
-  File "/home/karthikkrishnan24/Karthik_files/Miniproject/MindSync-App/backend/app.py", line 552, in analyze_voice
-    transcript = transcriber.transcribe(tmp_path)
-  File "/home/karthikkrishnan24/Karthik_files/Miniproject/MindSync-App/backend/.venv/lib64/python3.14/site-packages/assemblyai/transcriber.py", line 1146, in transcribe
-    return self._impl.transcribe(
-           ~~~~~~~~~~~~~~~~~~~~~^
-        data=data,
-        ^^^^^^^^^^
-        config=config,
-        ^^^^^^^^^^^^^^
-        poll=True,
-        ^^^^^^^^^^
-    )
-    ^
-  File "/home/karthikkrishnan24/Karthik_files/Miniproject/MindSync-App/backend/.venv/lib64/python3.14/site-packages/assemblyai/transcriber.py", line 922, in transcribe
-    return self.transcribe_file(
-           ~~~~~~~~~~~~~~~~~~~~^
-        data=data,
-        ^^^^^^^^^^
-        config=config,
-        ^^^^^^^^^^^^^^
-        poll=poll,
-        ^^^^^^^^^^
-    )
-    ^
-  File "/home/karthikkrishnan24/Karthik_files/Miniproject/MindSync-App/backend/.venv/lib64/python3.14/site-packages/assemblyai/transcriber.py", line 900, in transcribe_file
-    return self.transcribe_url(
-           ~~~~~~~~~~~~~~~~~~~^
-        url=audio_url,
-        ^^^^^^^^^^^^^^
-        config=config,
-        ^^^^^^^^^^^^^^
-        poll=poll,
-        ^^^^^^^^^^
-    )
-    ^
-  File "/home/karthikkrishnan24/Karthik_files/Miniproject/MindSync-App/backend/.venv/lib64/python3.14/site-packages/assemblyai/transcriber.py", line 879, in transcribe_url
-    response=api.create_transcript(
-             ~~~~~~~~~~~~~~~~~~~~~^
-        client=self._client.http_client,
-        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-        request=transcript_request,
-        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
-    ),
-    ^
-  File "/home/karthikkrishnan24/Karthik_files/Miniproject/MindSync-App/backend/.venv/lib64/python3.14/site-packages/assemblyai/api.py", line 45, in create_transcript
-    raise types.TranscriptError(
-    ...<2 lines>...
-    )
-assemblyai.types.TranscriptError: failed to transcribe url https://cdn.assemblyai.com/upload/c6aacf53b6f8584d509f085a1800745ab4ffdc14cb692b2b86eaedefe4a555cc/ebf0a55c-37fc-4df2-9973-458b0c4f1fc9: "speech_models" must be a non-empty list containing one or more of: "universal-3-pro", "universal-2"
-INFO:     127.0.0.1:53062 - "POST /api/avatar/analyze-voice HTTP/1.1" 500 Internal Server Error
-INFO:     Shutting down
-INFO:     Waiting for application shutdown.
-INFO:     Application shutdown complete.
-INFO:     Finished server process [11814]
+[firebase] admin init with project ID: mindsync-a34e3
+INFO:     127.0.0.1:46590 - "GET /health HTTP/1.1" 200 OK

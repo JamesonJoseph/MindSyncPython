@@ -7,7 +7,7 @@
     "icon": "./assets/images/mindlogo.png",
     "scheme": "mindsyncapp",
     "userInterfaceStyle": "automatic",
-    "newArchEnabled": true,
+    "newArchEnabled": false,
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.mindsync.app"
@@ -48,11 +48,17 @@
           "microphonePermission": "Allow MindSync to access your microphone for voice analysis."
         }
       ],
-      "expo-video"
+      "expo-video",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/images/mindlogo.png",
+          "color": "#00E0C6"
+        }
+      ]
     ],
     "experiments": {
-      "typedRoutes": true,
-      "reactCompiler": true
+      "typedRoutes": false
     },
     "assetBundlePatterns": [
       "app/assets/avatar/*",

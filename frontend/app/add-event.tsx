@@ -16,32 +16,27 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { auth } from '../firebaseConfig';
 import { getApiBaseUrl } from '../utils/api';
-import { toISTISOString, getISTNow } from '../utils/timezone';
-import { scheduleTaskReminder, requestNotificationPermissions } from '../utils/notifications';
+import { getTodayIST, toISTISOString, formatDateIST, getISTNow } from '../utils/timezone';
+import { scheduleEventReminder, requestNotificationPermissions } from '../utils/notifications';
 
-type Priority = 'high' | 'medium' | 'low';
+const colors = ['#FF9500', '#FF6B6B', '#00E0C6', '#5856D6', '#34C759', '#007AFF', '#FF2D55', '#AF52DE'];
 
-const priorities: { value: Priority; label: string; color: string; icon: string }[] = [
-  { value: 'high', label: 'High', color: '#FF3B30', icon: '🔴' },
-  { value: 'medium', label: 'Medium', color: '#FF9500', icon: '🟠' },
-  { value: 'low', label: 'Low', color: '#34C759', icon: '🟢' },
-];
-
-export default function AddTaskScreen() {
+export default function AddEventScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const userId = auth.currentUser?.uid || '';
   const params = useLocalSearchParams();
 
+  // Initialize with IST date
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
-  const [selectedPriority, setSelectedPriority] = useState<Priority>('medium');
   const [selectedDate, setSelectedDate] = useState(() => {
     if (params.date) {
       return new Date(params.date as string + 'T00:00:00+05:30');
     }
     return getISTNow();
   });
+  const [selectedTime, setSelectedTime] = useState('');
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [showTimePicker, setShowTimePicker] = useState(false);
   const [pickerMonth, setPickerMonth] = useState(() => {
@@ -50,9 +45,9 @@ export default function AddTaskScreen() {
     }
     return getISTNow();
   });
-  const [activeTab, setActiveTab] = useState<'task' | 'event' | 'birthday'>(params.tab as 'task' | 'event' | 'birthday' || 'task');
+  const [selectedColor, setSelectedColor] = useState('#FF9500');
+  const [activeTab, setActiveTab] = useState<'task' | 'event' | 'birthday'>('event');
   const [saving, setSaving] = useState(false);
-  const [selectedTime, setSelectedTime] = useState('');
 
   // Time picker state
   const [timeHour, setTimeHour] = useState(12);
@@ -113,12 +108,12 @@ export default function AddTaskScreen() {
 
   const handleSave = async () => {
     if (!title.trim()) {
-      Alert.alert('Error', 'Please enter a title');
+      Alert.alert('Error', 'Please enter an event title');
       return;
     }
 
     if (!userId) {
-      Alert.alert('Error', 'Please sign in to save tasks');
+      Alert.alert('Error', 'Please sign in to save events');
       return;
     }
 
@@ -128,101 +123,54 @@ export default function AddTaskScreen() {
     const dateStr = selectedDate.toISOString().split('T')[0];
     const isoDate = selectedTime ? toISTISOString(dateStr, selectedTime) : toISTISOString(dateStr);
 
-    const taskData = {
+    const eventData = {
       userId,
       title: title.trim(),
       description: description.trim(),
-      priority: selectedPriority,
-      event_datetime: isoDate,
+      date: isoDate,
       time: selectedTime,
-      type: 'task',
-      allDay: !selectedTime,
-      reminder_minutes: reminderMinutes,
-      status: 'pending',
+      color: selectedColor,
     };
 
-    console.log('Saving task (IST):', taskData);
-    
+    console.log('Saving event (IST):', eventData);
+
     try {
       const { authFetch } = await import('../utils/api');
-      const url = `${getApiBaseUrl()}/api/tasks`;
+      const url = `${getApiBaseUrl()}/api/events`;
       console.log('POST to:', url);
 
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => {
-        controller.abort();
-        console.log('Request timed out after 30 seconds');
-      }, 30000);
+      const res = await authFetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(eventData),
+      });
 
-      let savedSuccessfully = false;
-      let savedTaskId = null;
+      console.log('Response status:', res.status);
+      const responseData = await res.json().catch(() => null);
+      console.log('Response data:', responseData);
 
-      try {
-        const res = await authFetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(taskData),
-          signal: controller.signal,
-        });
-        
-        clearTimeout(timeoutId);
-        
-        console.log('Response status:', res.status);
-        const responseData = await res.json().catch(() => null);
-        console.log('Response data:', responseData);
-
-        if (res.ok) {
-          savedSuccessfully = true;
-          savedTaskId = responseData?._id;
-          
-          // Schedule reminder notification if enabled
-          if (enableReminder && savedTaskId) {
-            const taskDateTime = new Date(isoDate);
-            await scheduleTaskReminder(
-              savedTaskId,
-              title.trim(),
-              taskDateTime,
-              reminderMinutes
-            );
-          }
-        } else {
-          const errorMsg = responseData?.error || responseData?.detail || 'Failed to create task';
-          console.log('Server error:', errorMsg);
+      if (res.ok) {
+        // Schedule reminder notification if enabled
+        if (enableReminder && responseData?._id) {
+          const eventDateTime = new Date(isoDate);
+          await scheduleEventReminder(
+            responseData._id,
+            title.trim(),
+            eventDateTime,
+            reminderMinutes
+          );
         }
-      } catch (fetchError: any) {
-        clearTimeout(timeoutId);
-        console.log('Fetch error:', fetchError);
-        if (fetchError.name === 'AbortError') {
-          console.log('Request timed out - will save locally');
-        } else {
-          console.log('Network error - will save locally:', fetchError.message);
-        }
-      }
 
-      // If API failed, save locally as fallback
-      if (!savedSuccessfully) {
-        console.log('Saving task locally as fallback');
-        const localTasks = await AsyncStorage.getItem('mindsync_tasks');
-        const existingTasks = localTasks ? JSON.parse(localTasks) : [];
-        const newTask = {
-          _id: Date.now().toString(),
-          ...taskData,
-          created_at: new Date().toISOString(),
-        };
-        await AsyncStorage.setItem('mindsync_tasks', JSON.stringify([...existingTasks, newTask]));
-        savedSuccessfully = true;
-      }
-
-      if (savedSuccessfully) {
-        Alert.alert('Success', 'Task saved successfully!', [
+        Alert.alert('Success', 'Event saved successfully!', [
           { text: 'OK', onPress: () => router.back() }
         ]);
       } else {
-        Alert.alert('Error', 'Failed to save task. Please try again.');
+        const errorMsg = responseData?.error || responseData?.detail || 'Failed to create event';
+        Alert.alert('Error', errorMsg);
       }
     } catch (error: any) {
-      console.log('Error creating task:', error);
-      Alert.alert('Error', `Failed to save task: ${error.message || 'Unknown error'}`);
+      console.log('Error creating event:', error);
+      Alert.alert('Error', `Failed to save event: ${error.message || 'Network error'}`);
     } finally {
       setSaving(false);
     }
@@ -244,9 +192,13 @@ export default function AddTaskScreen() {
         <TouchableOpacity onPress={() => router.back()} style={styles.headerButton}>
           <Ionicons name="close" size={28} color="#333" />
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>Add Task</Text>
-        <TouchableOpacity onPress={handleSave} style={styles.headerButton}>
-          <Text style={styles.saveText}>Save</Text>
+        <Text style={styles.headerTitle}>Add Event</Text>
+        <TouchableOpacity onPress={handleSave} style={styles.headerButton} disabled={saving}>
+          {saving ? (
+            <ActivityIndicator size="small" color="#FF9500" />
+          ) : (
+            <Text style={styles.saveText}>Save</Text>
+          )}
         </TouchableOpacity>
       </View>
 
@@ -255,14 +207,14 @@ export default function AddTaskScreen() {
         <View style={styles.tabsContainer}>
           <TouchableOpacity 
             style={[styles.tab, activeTab === 'task' && styles.tabActive]}
-            onPress={() => {}}
+            onPress={() => router.replace('/add-task')}
           >
             <Ionicons name="checkbox-outline" size={20} color={activeTab === 'task' ? "#00E0C6" : "#999"} />
-            <Text style={[styles.tabText, activeTab === 'task' && styles.tabTextActive]}>Task</Text>
+            <Text style={[styles.tabText, activeTab === 'task' && { color: '#00E0C6' }]}>Task</Text>
           </TouchableOpacity>
           <TouchableOpacity 
             style={[styles.tab, activeTab === 'event' && styles.tabActiveEvent]}
-            onPress={() => router.replace('/add-event')}
+            onPress={() => {}}
           >
             <Ionicons name="calendar-outline" size={20} color={activeTab === 'event' ? "#FF9500" : "#999"} />
             <Text style={[styles.tabText, activeTab === 'event' && { color: '#FF9500' }]}>Event</Text>
@@ -278,9 +230,9 @@ export default function AddTaskScreen() {
 
         {/* Date Display */}
         <View style={styles.dateDisplayBanner}>
-          <Ionicons name="calendar" size={20} color="#00E0C6" />
+          <Ionicons name="calendar" size={20} color="#FF9500" />
           <Text style={styles.dateDisplayBannerText}>
-            Adding task for: {selectedDate.toLocaleDateString('en-IN', {
+            Adding event for: {selectedDate.toLocaleDateString('en-IN', {
               timeZone: 'Asia/Kolkata',
               weekday: 'short',
               month: 'short',
@@ -292,10 +244,10 @@ export default function AddTaskScreen() {
 
         {/* Title Input */}
         <View style={styles.section}>
-          <Text style={styles.label}>Title</Text>
+          <Text style={styles.label}>Event Title</Text>
           <TextInput
             style={styles.input}
-            placeholder="What needs to be done?"
+            placeholder="What's the event?"
             value={title}
             onChangeText={setTitle}
             placeholderTextColor="#999"
@@ -316,39 +268,11 @@ export default function AddTaskScreen() {
           />
         </View>
 
-        {/* Priority Selector */}
-        <View style={styles.section}>
-          <Text style={styles.label}>Priority</Text>
-          <View style={styles.priorityContainer}>
-            {priorities.map((priority) => (
-              <TouchableOpacity
-                key={priority.value}
-                style={[
-                  styles.priorityOption,
-                  selectedPriority === priority.value && { 
-                    backgroundColor: priority.color + '20',
-                    borderColor: priority.color 
-                  }
-                ]}
-                onPress={() => setSelectedPriority(priority.value)}
-              >
-                <Text style={styles.priorityIcon}>{priority.icon}</Text>
-                <Text style={[
-                  styles.priorityLabel,
-                  selectedPriority === priority.value && { color: priority.color }
-                ]}>
-                  {priority.label}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-        </View>
-
         {/* Date Picker */}
         <View style={styles.section}>
           <Text style={styles.label}>Date</Text>
           <TouchableOpacity style={styles.datePicker} onPress={() => setShowDatePicker(true)}>
-            <Ionicons name="calendar" size={24} color="#00E0C6" />
+            <Ionicons name="calendar" size={24} color="#FF9500" />
             <Text style={styles.dateText}>{formatDate(selectedDate)}</Text>
             <Ionicons name="chevron-forward" size={20} color="#999" />
           </TouchableOpacity>
@@ -358,7 +282,7 @@ export default function AddTaskScreen() {
         <View style={styles.section}>
           <Text style={styles.label}>Time (optional)</Text>
           <TouchableOpacity style={styles.datePicker} onPress={() => setShowTimePicker(true)}>
-            <Ionicons name="time" size={24} color="#00E0C6" />
+            <Ionicons name="time" size={24} color="#FF9500" />
             <Text style={styles.dateText}>{selectedTime || 'Add time'}</Text>
             <Ionicons name="chevron-forward" size={20} color="#999" />
           </TouchableOpacity>
@@ -368,13 +292,13 @@ export default function AddTaskScreen() {
         <View style={styles.section}>
           <View style={styles.reminderHeader}>
             <View style={styles.reminderTitleRow}>
-              <Ionicons name="notifications" size={20} color="#00E0C6" />
+              <Ionicons name="notifications" size={20} color="#FF9500" />
               <Text style={styles.label}>Reminder</Text>
             </View>
             <Switch
               value={enableReminder}
               onValueChange={setEnableReminder}
-              trackColor={{ false: '#E0E0E0', true: '#00E0C6' }}
+              trackColor={{ false: '#E0E0E0', true: '#FF9500' }}
               thumbColor="#fff"
             />
           </View>
@@ -408,6 +332,28 @@ export default function AddTaskScreen() {
               </View>
             </View>
           )}
+        </View>
+
+        {/* Color Picker */}
+        <View style={styles.section}>
+          <Text style={styles.label}>Color</Text>
+          <View style={styles.colorPicker}>
+            {colors.map((color) => (
+              <TouchableOpacity
+                key={color}
+                style={[
+                  styles.colorOption,
+                  { backgroundColor: color },
+                  selectedColor === color && styles.colorOptionSelected
+                ]}
+                onPress={() => setSelectedColor(color)}
+              >
+                {selectedColor === color && (
+                  <Ionicons name="checkmark" size={20} color="#fff" />
+                )}
+              </TouchableOpacity>
+            ))}
+          </View>
         </View>
 
         <View style={{ height: 120 }} />
@@ -494,13 +440,13 @@ export default function AddTaskScreen() {
               {/* Hour Column */}
               <View style={styles.timeColumn}>
                 <TouchableOpacity style={styles.arrowButton} onPress={incrementHour}>
-                  <Ionicons name="chevron-up" size={32} color="#00E0C6" />
+                  <Ionicons name="chevron-up" size={32} color="#FF9500" />
                 </TouchableOpacity>
                 <View style={styles.timeValueBox}>
                   <Text style={styles.timeValue}>{timeHour.toString().padStart(2, '0')}</Text>
                 </View>
                 <TouchableOpacity style={styles.arrowButton} onPress={decrementHour}>
-                  <Ionicons name="chevron-down" size={32} color="#00E0C6" />
+                  <Ionicons name="chevron-down" size={32} color="#FF9500" />
                 </TouchableOpacity>
               </View>
 
@@ -509,26 +455,26 @@ export default function AddTaskScreen() {
               {/* Minute Column */}
               <View style={styles.timeColumn}>
                 <TouchableOpacity style={styles.arrowButton} onPress={incrementMinute}>
-                  <Ionicons name="chevron-up" size={32} color="#00E0C6" />
+                  <Ionicons name="chevron-up" size={32} color="#FF9500" />
                 </TouchableOpacity>
                 <View style={styles.timeValueBox}>
                   <Text style={styles.timeValue}>{timeMinute.toString().padStart(2, '0')}</Text>
                 </View>
                 <TouchableOpacity style={styles.arrowButton} onPress={decrementMinute}>
-                  <Ionicons name="chevron-down" size={32} color="#00E0C6" />
+                  <Ionicons name="chevron-down" size={32} color="#FF9500" />
                 </TouchableOpacity>
               </View>
 
               {/* AM/PM Column */}
               <View style={styles.timeColumn}>
                 <TouchableOpacity style={styles.arrowButton} onPress={togglePeriod}>
-                  <Ionicons name="chevron-up" size={32} color="#00E0C6" />
+                  <Ionicons name="chevron-up" size={32} color="#FF9500" />
                 </TouchableOpacity>
                 <TouchableOpacity style={styles.timeValueBoxPeriod} onPress={togglePeriod}>
                   <Text style={styles.timeValuePeriod}>{timePeriod}</Text>
                 </TouchableOpacity>
                 <TouchableOpacity style={styles.arrowButton} onPress={togglePeriod}>
-                  <Ionicons name="chevron-down" size={32} color="#00E0C6" />
+                  <Ionicons name="chevron-down" size={32} color="#FF9500" />
                 </TouchableOpacity>
               </View>
             </View>
@@ -597,7 +543,7 @@ const styles = StyleSheet.create({
   saveText: {
     fontSize: 16,
     fontWeight: '600',
-    color: '#00E0C6',
+    color: '#FF9500',
     textAlign: 'right',
   },
   content: {
@@ -657,13 +603,10 @@ const styles = StyleSheet.create({
     color: '#999',
     marginLeft: 6,
   },
-  tabTextActive: {
-    color: '#00E0C6',
-  },
   dateDisplayBanner: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#E3F2FD',
+    backgroundColor: '#FFF4E6',
     borderRadius: 12,
     paddingHorizontal: 16,
     paddingVertical: 12,
@@ -671,34 +614,9 @@ const styles = StyleSheet.create({
   },
   dateDisplayBannerText: {
     fontSize: 14,
-    color: '#1976D2',
+    color: '#E65100',
     marginLeft: 10,
     fontWeight: '500',
-  },
-  priorityContainer: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-  },
-  priorityOption: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 14,
-    borderRadius: 12,
-    borderWidth: 2,
-    borderColor: '#e0e0e0',
-    backgroundColor: '#fff',
-    marginHorizontal: 4,
-  },
-  priorityIcon: {
-    fontSize: 16,
-    marginRight: 6,
-  },
-  priorityLabel: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#666',
   },
   datePicker: {
     flexDirection: 'row',
@@ -716,6 +634,22 @@ const styles = StyleSheet.create({
     color: '#333',
     marginLeft: 12,
   },
+  colorPicker: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 12,
+  },
+  colorOption: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  colorOptionSelected: {
+    borderWidth: 3,
+    borderColor: '#333',
+  },
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.5)',
@@ -726,6 +660,13 @@ const styles = StyleSheet.create({
     borderTopLeftRadius: 20,
     borderTopRightRadius: 20,
     padding: 20,
+  },
+  timePickerModalNew: {
+    backgroundColor: '#fff',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    padding: 20,
+    maxHeight: '85%',
   },
   modalHeader: {
     flexDirection: 'row',
@@ -772,12 +713,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   selectedDay: {
-    backgroundColor: '#00E0C6',
+    backgroundColor: '#FF9500',
     borderRadius: 20,
   },
   todayDay: {
     borderWidth: 2,
-    borderColor: '#00E0C6',
+    borderColor: '#FF9500',
     borderRadius: 20,
   },
   dayText: {
@@ -789,17 +730,10 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   todayDayText: {
-    color: '#00E0C6',
+    color: '#FF9500',
     fontWeight: '600',
   },
-  // Time Picker Styles
-  timePickerModalNew: {
-    backgroundColor: '#fff',
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    padding: 20,
-    maxHeight: '85%',
-  },
+  // New Time Picker Styles
   timePickerContainer: {
     flexDirection: 'row',
     justifyContent: 'center',
@@ -830,7 +764,7 @@ const styles = StyleSheet.create({
     shadowRadius: 2,
   },
   timeValueBoxPeriod: {
-    backgroundColor: '#00E0C6',
+    backgroundColor: '#FF9500',
     borderRadius: 12,
     paddingVertical: 12,
     paddingHorizontal: 16,
@@ -853,7 +787,7 @@ const styles = StyleSheet.create({
     marginHorizontal: 4,
   },
   confirmTimeButton: {
-    backgroundColor: '#00E0C6',
+    backgroundColor: '#FF9500',
     borderRadius: 12,
     paddingVertical: 14,
     alignItems: 'center',
@@ -886,7 +820,7 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   quickTimeOptionSelected: {
-    backgroundColor: '#00E0C6',
+    backgroundColor: '#FF9500',
   },
   quickTimeText: {
     fontSize: 14,
@@ -932,8 +866,8 @@ const styles = StyleSheet.create({
     borderColor: '#e0e0e0',
   },
   reminderOptionSelected: {
-    backgroundColor: '#00E0C6',
-    borderColor: '#00E0C6',
+    backgroundColor: '#FF9500',
+    borderColor: '#FF9500',
   },
   reminderOptionText: {
     fontSize: 14,

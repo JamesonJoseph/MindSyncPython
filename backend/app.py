@@ -122,18 +122,41 @@ app.add_middleware(
 )
 
 def _utc_now() -> datetime:
+    """Return current time in UTC (for storage)."""
     return datetime.now(timezone.utc)
+
+def _ist_now() -> datetime:
+    """Return current time in IST (Asia/Kolkata, UTC+5:30)."""
+    from datetime import timedelta
+    ist_offset = timedelta(hours=5, minutes=30)
+    ist_timezone = timezone(ist_offset)
+    return datetime.now(ist_timezone)
+
+def _to_ist(dt: datetime) -> datetime:
+    """Convert a datetime to IST timezone."""
+    if dt.tzinfo is None:
+        # Assume UTC if no timezone info
+        dt = dt.replace(tzinfo=timezone.utc)
+    from datetime import timedelta
+    ist_offset = timedelta(hours=5, minutes=30)
+    ist_timezone = timezone(ist_offset)
+    return dt.astimezone(ist_timezone)
 
 def _serialize_doc(doc: dict) -> dict:
     if not doc: return doc
-    out = dict(doc)
-    if "_id" in out:
-        out["_id"] = str(out["_id"])
-    if isinstance(out.get("date"), datetime):
-        out["date"] = out["date"].isoformat()
-    if isinstance(out.get("dueDate"), datetime):
-        out["dueDate"] = out["dueDate"].isoformat()
-    return out
+    try:
+        out = dict(doc)
+        if "_id" in out:
+            out["_id"] = str(out["_id"])
+        # Handle various datetime fields
+        datetime_fields = ["date", "dueDate", "event_datetime", "reminder_datetime", "created_at"]
+        for field in datetime_fields:
+            if isinstance(out.get(field), datetime):
+                out[field] = out[field].isoformat()
+        return out
+    except Exception as e:
+        print(f"Error serializing doc: {e}")
+        return {"_id": str(doc.get("_id")), "error": "Serialization error"}
 
 def _parse_object_id(raw_id: str) -> ObjectId:
     try:
@@ -185,7 +208,6 @@ def _get_mongo_client() -> MongoClient:
     if _mongo_client is None:
         _mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=DB_CONNECT_TIMEOUT_MS)
     return _mongo_client
-
 def _get_collections():
     database = _get_mongo_client()[db_name]
     return (
@@ -196,6 +218,8 @@ def _get_collections():
         database["voice_analyses"],
         database["chat_conversations"],
         database["documents"],
+        database["birthdays"],
+        database["events"]
     )
 
 def _normalize_chat_messages(raw_messages: list | None) -> list[dict]:
@@ -478,74 +502,398 @@ async def update_journal(journal_id: str, request: Request):
     except Exception:
         return JSONResponse(status_code=500, content={"error": "Failed to update journal"})
 
-# ==================== TASKS ====================
+# ==================== TASKS (New Structure) ====================
+
+def _parse_iso_datetime(raw_value: str | None) -> datetime | None:
+    """Parse ISO format datetime string to Python datetime."""
+    if not raw_value:
+        return None
+    try:
+        # Handle both with and without Z suffix
+        normalized = str(raw_value).replace("Z", "+00:00")
+        return datetime.fromisoformat(normalized)
+    except (ValueError, AttributeError):
+        return None
 
 @app.get("/api/tasks")
 async def get_tasks(request: Request):
-    auth_info = await _require_auth(request)
-    uid = auth_info.get("uid")
-    _, _, tasks, _, _, _ = _get_collections()
-    docs = list(tasks.find({"userId": uid}).sort("date", DESCENDING))
-    return [_serialize_doc(doc) for doc in docs]
+    """Get all tasks for the authenticated user."""
+    try:
+        print("=== GET TASKS STARTED ===")
+        auth_info = await _require_auth(request)
+        uid = auth_info.get("uid")
+        print(f"Getting tasks for user: {uid}")
+        _, _, tasks, _, _, _, _, _ = _get_collections()
+        
+        docs = list(tasks.find({"userId": uid}).sort("event_datetime", ASCENDING))
+        print(f"Found {len(docs)} tasks in DB")
+        
+        serialized = [_serialize_doc(doc) for doc in docs]
+        print(f"Serialized tasks: {serialized}")
+        print("=== GET TASKS COMPLETED ===")
+        return serialized
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error fetching tasks: {e}")
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(status_code=500, content={"error": "Failed to fetch tasks"})
 
 @app.post("/api/tasks")
 async def create_task(request: Request):
-    auth_info = await _require_auth(request)
-    uid = auth_info.get("uid")
-    email = auth_info.get("email")
-    _, _, tasks, _, _, _ = _get_collections()
-    payload = await request.json()
-    doc = {
-        "userId": str(uid or ""),
-        "userEmail": str(email or ""),
-        "title": str(payload.get("title", "Untitled Task")),
-        "description": str(payload.get("description", "")),
-        "status": str(payload.get("status", "pending")),
-        "date": _utc_now(),
-    }
-    inserted = tasks.insert_one(doc)
-    created = tasks.find_one({"_id": inserted.inserted_id})
-    if not created:
-        return JSONResponse(status_code=500, content={"error": "Failed to create task"})
-    return JSONResponse(status_code=201, content=_serialize_doc(created))
+    """Create a new task/event/birthday."""
+    print("=== CREATE TASK ENDPOINT REACHED ===")
+    try:
+        print("=== CREATE TASK STARTED ===")
+        
+        # Get auth info first - this is the most likely failure point
+        auth_header = request.headers.get("Authorization")
+        print(f"Auth header present: {bool(auth_header)}")
+        
+        try:
+            auth_info = await _require_auth(request)
+            print(f"Auth OK, uid: {auth_info.get('uid')}")
+        except Exception as auth_err:
+            print(f"Auth error: {auth_err}")
+            import traceback
+            traceback.print_exc()
+            return JSONResponse(status_code=401, content={"error": f"Auth failed: {str(auth_err)}"})
+        
+        uid = auth_info.get("uid")
+        email = auth_info.get("email")
+        
+        try:
+            _, _, tasks, _, _, _, _, _ = _get_collections()
+            print("Collections obtained successfully")
+        except Exception as coll_err:
+            print(f"Collection error: {coll_err}")
+            import traceback
+            traceback.print_exc()
+            return JSONResponse(status_code=500, content={"error": f"DB error: {str(coll_err)}"})
+            
+        payload = await request.json()
+        print('Task payload:', payload)
+        
+        # Parse and validate datetime fields
+        event_datetime = _parse_iso_datetime(payload.get("event_datetime"))
+        if not event_datetime:
+            event_datetime = _utc_now()
+        
+        reminder_datetime = _parse_iso_datetime(payload.get("reminder_datetime"))
+        if not reminder_datetime:
+            # Calculate reminder_datetime from event_datetime and reminder_minutes
+            reminder_minutes = int(payload.get("reminder_minutes", 30))
+            reminder_datetime = event_datetime - __import__('datetime').timedelta(minutes=reminder_minutes)
+        
+        # Build document with proper datetime values
+        doc = {
+            "userId": str(uid or ""),
+            "userEmail": str(email or ""),
+            "id": int(payload.get("id", int(_utc_now().timestamp() * 1000))),  # Client-side ID
+            "title": str(payload.get("title", "Untitled")),
+            "description": str(payload.get("description", "")),
+            "type": str(payload.get("type", "task")),  # event, task, birthday
+            "allDay": bool(payload.get("allDay", True)),
+            "event_datetime": event_datetime,  # Stored as datetime object
+            "reminder_minutes": int(payload.get("reminder_minutes", 30)),
+            "reminder_datetime": reminder_datetime,  # Stored as datetime object
+            "status": str(payload.get("status", "pending")),  # pending, completed
+            "priority": str(payload.get("priority", "medium")),
+            "time": str(payload.get("time", "")),
+            "created_at": _parse_iso_datetime(payload.get("created_at")) or _utc_now(),
+        }
+        
+        inserted = tasks.insert_one(doc)
+        print(f"Inserted task with ID: {inserted.inserted_id}")
+        created = tasks.find_one({"_id": inserted.inserted_id})
+        print(f"Created task: {created}")
+        
+        if not created:
+            return JSONResponse(status_code=500, content={"error": "Failed to create task"})
+        
+        serialized = _serialize_doc(created)
+        print(f"Serialized task: {serialized}")
+        print("=== CREATE TASK COMPLETED ===")
+        return JSONResponse(status_code=201, content=serialized)
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error creating task: {e}")
+        return JSONResponse(status_code=500, content={"error": f"Failed to create task: {str(e)}"})
+>>>>>>> Stashed changes
 
 @app.put("/api/tasks/{task_id}")
 async def update_task(task_id: str, request: Request):
+    """Update an existing task."""
     try:
         auth_info = await _require_auth(request)
         uid = auth_info.get("uid")
-        _, _, tasks, _, _, _ = _get_collections()
+        _, _, tasks, _, _, _, _, _ = _get_collections()
         oid = _parse_object_id(task_id)
         payload = await request.json()
-        allowed_fields = {"title", "description", "status"}
-        updates = {k: v for k, v in payload.items() if k in allowed_fields}
+        
+        # Parse datetime fields if provided
+        updates = {}
+        
+        if "title" in payload:
+            updates["title"] = str(payload["title"])
+        if "description" in payload:
+            updates["description"] = str(payload["description"])
+        if "type" in payload:
+            updates["type"] = str(payload["type"])
+        if "allDay" in payload:
+            updates["allDay"] = bool(payload["allDay"])
+        if "status" in payload:
+            updates["status"] = str(payload["status"])
+        if "priority" in payload:
+            updates["priority"] = str(payload["priority"])
+        if "time" in payload:
+            updates["time"] = str(payload["time"])
+        if "reminder_minutes" in payload:
+            updates["reminder_minutes"] = int(payload["reminder_minutes"])
+        
+        # Handle datetime updates
+        if "event_datetime" in payload:
+            dt = _parse_iso_datetime(payload["event_datetime"])
+            if dt:
+                updates["event_datetime"] = dt
+        
+        if "reminder_datetime" in payload:
+            dt = _parse_iso_datetime(payload["reminder_datetime"])
+            if dt:
+                updates["reminder_datetime"] = dt
+        elif "event_datetime" in updates and "reminder_minutes" in updates:
+            # Recalculate reminder_datetime
+            reminder_minutes = updates.get("reminder_minutes", payload.get("reminder_minutes", 30))
+            event_dt = updates.get("event_datetime") or _parse_iso_datetime(payload.get("event_datetime"))
+            if event_dt:
+                updates["reminder_datetime"] = event_dt - __import__('datetime').timedelta(minutes=reminder_minutes)
+        
         if not updates:
             return JSONResponse(status_code=400, content={"error": "No valid fields to update"})
+        
         result = tasks.update_one({"_id": oid, "userId": uid}, {"$set": updates})
+        
         if result.matched_count == 0:
             return JSONResponse(status_code=404, content={"error": "Task not found"})
+        
         updated = tasks.find_one({"_id": oid})
         return _serialize_doc(updated)
+    
     except HTTPException:
         raise
-    except Exception:
+    except Exception as e:
+        print(f"Error updating task: {e}")
         return JSONResponse(status_code=500, content={"error": "Failed to update task"})
 
 @app.delete("/api/tasks/{task_id}")
 async def delete_task(task_id: str, request: Request):
+    """Delete a task."""
     try:
         auth_info = await _require_auth(request)
         uid = auth_info.get("uid")
-        _, _, tasks, _, _, _ = _get_collections()
+        _, _, tasks, _, _, _, _, _ = _get_collections()
         oid = _parse_object_id(task_id)
+        
         result = tasks.delete_one({"_id": oid, "userId": uid})
+        
         if result.deleted_count == 0:
             return JSONResponse(status_code=404, content={"error": "Task not found"})
+        
         return {"message": "Task deleted successfully"}
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error deleting task: {e}")
+        return JSONResponse(status_code=500, content={"error": "Failed to delete task"})
+
+
+# ==================== BIRTHDAYS ====================
+
+@app.get("/api/birthdays")
+async def get_birthdays(request: Request):
+    auth_info = await _require_auth(request)
+    uid = auth_info.get("uid")
+    _, _, _, _, _, _, birthdays, _ = _get_collections()
+    docs = list(birthdays.find({"userId": uid}))
+    return [_serialize_doc(doc) for doc in docs]
+
+@app.post("/api/birthdays")
+async def create_birthday(request: Request):
+    auth_info = await _require_auth(request)
+    uid = auth_info.get("uid")
+    _, _, _, _, _, _, birthdays, _ = _get_collections()
+    payload = await request.json()
+    
+    birthday_date = payload.get("date", "")
+    month_day = ""
+    if birthday_date:
+        try:
+            dt = datetime.fromisoformat(birthday_date.replace("Z", "+00:00"))
+            month_day = f"{dt.month:02d}-{dt.day:02d}"
+        except:
+            month_day = birthday_date[5:] if len(birthday_date) >= 5 else ""
+    
+    doc = {
+        "userId": str(uid or ""),
+        "name": str(payload.get("name", "")),
+        "date": birthday_date,
+        "monthDay": month_day,
+        "year": payload.get("year"),
+        "relation": str(payload.get("relation", "")),
+        "color": str(payload.get("color", "#FF6B6B")),
+        "notifications": payload.get("notifications", []),
+        "createdAt": _utc_now(),
+    }
+    inserted = birthdays.insert_one(doc)
+    created = birthdays.find_one({"_id": inserted.inserted_id})
+    if not created:
+        return JSONResponse(status_code=500, content={"error": "Failed to create birthday"})
+    return JSONResponse(status_code=201, content=_serialize_doc(created))
+
+@app.put("/api/birthdays/{birthday_id}")
+async def update_birthday(birthday_id: str, request: Request):
+    try:
+        auth_info = await _require_auth(request)
+        uid = auth_info.get("uid")
+        _, _, _, _, _, _, birthdays, _ = _get_collections()
+        oid = _parse_object_id(birthday_id)
+        payload = await request.json()
+        
+        birthday_date = payload.get("date")
+        if birthday_date:
+            try:
+                dt = datetime.fromisoformat(birthday_date.replace("Z", "+00:00"))
+                payload["monthDay"] = f"{dt.month:02d}-{dt.day:02d}"
+            except:
+                pass
+        
+        allowed_fields = {"name", "date", "year", "relation", "color", "notifications", "monthDay"}
+        updates = {k: v for k, v in payload.items() if k in allowed_fields}
+        
+        if not updates:
+            return JSONResponse(status_code=400, content={"error": "No valid fields to update"})
+        result = birthdays.update_one({"_id": oid, "userId": uid}, {"$set": updates})
+        if result.matched_count == 0:
+            return JSONResponse(status_code=404, content={"error": "Birthday not found"})
+        updated = birthdays.find_one({"_id": oid})
+        return _serialize_doc(updated)
     except HTTPException:
         raise
     except Exception:
-        return JSONResponse(status_code=500, content={"error": "Failed to delete task"})
+        return JSONResponse(status_code=500, content={"error": "Failed to update birthday"})
+
+@app.delete("/api/birthdays/{birthday_id}")
+async def delete_birthday(birthday_id: str, request: Request):
+    try:
+        auth_info = await _require_auth(request)
+        uid = auth_info.get("uid")
+        _, _, _, _, _, _, birthdays, _ = _get_collections()
+        oid = _parse_object_id(birthday_id)
+        result = birthdays.delete_one({"_id": oid, "userId": uid})
+        if result.deleted_count == 0:
+            return JSONResponse(status_code=404, content={"error": "Birthday not found"})
+        return {"message": "Birthday deleted successfully"}
+    except HTTPException:
+        raise
+    except Exception:
+        return JSONResponse(status_code=500, content={"error": "Failed to delete birthday"})
+
+
+# ==================== EVENTS ====================
+
+@app.get("/api/events")
+async def get_events(request: Request, date: str | None = None):
+    auth_info = await _require_auth(request)
+    uid = auth_info.get("uid")
+    _, _, _, _, _, _, _, events = _get_collections()
+    
+    query = {"userId": uid}
+    if date:
+        query["date"] = {"$regex": f"^{date}"}
+    
+    docs = list(events.find(query).sort("date", ASCENDING))
+    return [_serialize_doc(doc) for doc in docs]
+
+@app.post("/api/events")
+async def create_event(request: Request):
+    auth_info = await _require_auth(request)
+    uid = auth_info.get("uid")
+    _, _, _, _, _, _, _, events = _get_collections()
+    payload = await request.json()
+    
+    event_date = payload.get("date", "")
+    if event_date:
+        try:
+            event_date = datetime.fromisoformat(event_date.replace("Z", "+00:00"))
+        except:
+            event_date = _utc_now()
+    
+    doc = {
+        "userId": str(uid or ""),
+        "title": str(payload.get("title", "Untitled Event")),
+        "description": str(payload.get("description", "")),
+        "date": event_date,
+        "time": str(payload.get("time", "")),
+        "color": str(payload.get("color", "#FF9500")),
+        "createdAt": _utc_now(),
+    }
+    inserted = events.insert_one(doc)
+    created = events.find_one({"_id": inserted.inserted_id})
+    if not created:
+        return JSONResponse(status_code=500, content={"error": "Failed to create event"})
+    return JSONResponse(status_code=201, content=_serialize_doc(created))
+
+@app.put("/api/events/{event_id}")
+async def update_event(event_id: str, request: Request):
+    try:
+        auth_info = await _require_auth(request)
+        uid = auth_info.get("uid")
+        _, _, _, _, _, _, _, events = _get_collections()
+        oid = _parse_object_id(event_id)
+        payload = await request.json()
+        
+        event_date = payload.get("date")
+        if event_date:
+            try:
+                payload["date"] = datetime.fromisoformat(event_date.replace("Z", "+00:00"))
+            except:
+                del payload["date"]
+        
+        allowed_fields = {"title", "description", "date", "time", "color"}
+        updates = {k: v for k, v in payload.items() if k in allowed_fields}
+        
+        if not updates:
+            return JSONResponse(status_code=400, content={"error": "No valid fields to update"})
+        result = events.update_one({"_id": oid, "userId": uid}, {"$set": updates})
+        if result.matched_count == 0:
+            return JSONResponse(status_code=404, content={"error": "Event not found"})
+        updated = events.find_one({"_id": oid})
+        return _serialize_doc(updated)
+    except HTTPException:
+        raise
+    except Exception:
+        return JSONResponse(status_code=500, content={"error": "Failed to update event"})
+
+@app.delete("/api/events/{event_id}")
+async def delete_event(event_id: str, request: Request):
+    try:
+        auth_info = await _require_auth(request)
+        uid = auth_info.get("uid")
+        _, _, _, _, _, _, _, events = _get_collections()
+        oid = _parse_object_id(event_id)
+        result = events.delete_one({"_id": oid, "userId": uid})
+        if result.deleted_count == 0:
+            return JSONResponse(status_code=404, content={"error": "Event not found"})
+        return {"message": "Event deleted successfully"}
+    except HTTPException:
+        raise
+    except Exception:
+        return JSONResponse(status_code=500, content={"error": "Failed to delete event"})
+>>>>>>> Stashed changes
 
 
 # ==================== AI CAPABILITIES ====================
@@ -738,7 +1086,10 @@ async def chat_agent(request: Request):
                         "title": function_args.get("title", "Untitled Task"),
                         "description": function_args.get("description", ""),
                         "status": function_args.get("status", "pending"),
-                        "date": _utc_now()
+                        "date": _utc_now(),
+                        "event_datetime": _utc_now(),
+                        "type": "task",
+                        "priority": "medium"
                     }
                     inserted = tasks.insert_one(doc)
                     tool_response = json.dumps({"status": "success", "taskId": str(inserted.inserted_id)})
