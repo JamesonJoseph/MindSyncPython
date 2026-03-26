@@ -227,7 +227,8 @@ def _get_collections():
         database["tasks"], 
         database["users"], 
         database["voice_analyses"],
-        database["documents"]
+        database["documents"],
+        database["avatar_conversations"]
     )
 
 ...
@@ -554,9 +555,26 @@ async def chat_agent(request: Request):
     email = auth_info.get("email")
     
     payload = await request.json()
-    messages = payload.get("messages", [])
+    user_message = payload.get("message", "") # Latest user message
+    
+    # Get recent conversation history from DB for context
+    _, _, _, _, _, _, avatar_col = _get_collections()
+    
+    # Fetch last 20 conversation pairs
+    history_cursor = avatar_col.find({"userId": uid}).sort("date", DESCENDING).limit(20)
+    history = list(history_cursor)
+    history.reverse() # Oldest first for LLM
+    
+    # Format history for LLM context
+    messages = []
+    for h in history:
+        messages.append({"role": "user", "content": h.get("user_query", "")})
+        messages.append({"role": "assistant", "content": h.get("assistant_response", "")})
+    
+    # Add current message
+    messages.append({"role": "user", "content": user_message})
 
-    # Define tools
+    # Define tools (same as before)
     tools = [
         {
             "type": "function",
@@ -617,9 +635,23 @@ async def chat_agent(request: Request):
 
     try:
         # System message setup
+        current_time_str = _utc_now().strftime("%A, %B %d, %Y at %H:%M UTC")
         system_msg = {
             "role": "system", 
-            "content": "You are MindSync AI, an empathetic and helpful personal assistant. You can manage tasks and review the user's journal entries to better understand their context and feelings. You may use tools to achieve this."
+            "content": f"""You are an empathetic, supportive, and active-listening AI companion. Your primary goal is to help the user navigate their emotions, reduce stress, and improve their overall well-being. 
+
+Today is {current_time_str}.
+
+You have access to the user's past conversational history. Always use this context to provide personalized, consistent support.
+
+CRITICAL RULES AND CONSTRAINTS:
+1. NO DIAGNOSES: You are a supportive guide, not a licensed medical professional. Never diagnose the user with any medical or psychiatric condition (e.g., do not say "You have depression"). 
+2. VOICE-OPTIMIZED OUTPUT: Your responses will be spoken aloud by a Text-to-Speech engine. You MUST write in natural, spoken English. Do not use bullet points, numbered lists, emojis, asterisks, bolding, or markdown. Keep your sentences relatively short and conversational.
+3. CBT FRAMEWORK: When the user expresses negative emotions or stress, gently guide them using Cognitive Behavioral Therapy (CBT) techniques. Help them identify negative thought patterns (cognitive distortions) and guide them to reframe those thoughts into more balanced, realistic perspectives. Ask guiding questions rather than just giving advice.
+4. EARLY WARNING SYSTEM: If the user consistently expresses thoughts of severe hopelessness, extreme burnout, or danger to themselves, you must gently but clearly advise them to seek support from friends, family, or a professional human counselor. 
+5. CONVERSATIONAL CADENCE: Do not monologue. Respond with one or two concise thoughts, followed by a gentle, open-ended question to keep the user talking. Actively validate their feelings before offering a new perspective.
+
+Current Goal: Listen empathetically, validate the user's current emotional state, gracefully reference their past context if relevant, and gently guide them toward a positive, reframed mindset."""
         }
         
         call_messages = [system_msg] + messages
@@ -633,6 +665,7 @@ async def chat_agent(request: Request):
         )
 
         response_message = response.choices[0].message
+        assistant_content = ""
 
         # Check if the model wants to call a function
         tool_calls = response_message.tool_calls
@@ -643,12 +676,11 @@ async def chat_agent(request: Request):
                 "tool_calls": [t.model_dump() for t in tool_calls]
             })
 
-            journals, _, tasks, _, _, _ = _get_collections()
+            journals, _, tasks, _, _, _, _ = _get_collections()
 
             for tool_call in tool_calls:
                 function_name = tool_call.function.name
                 function_args = json.loads(tool_call.function.arguments)
-
                 tool_response = ""
 
                 if function_name == "get_tasks":
@@ -685,21 +717,47 @@ async def chat_agent(request: Request):
                     "content": tool_response
                 })
 
-            # Call the model again with the function response
             second_response = groq_client.chat.completions.create(
                 model="llama-3.1-8b-instant",
                 messages=call_messages,
                 max_tokens=4096
             )
-            return {"role": "assistant", "content": second_response.choices[0].message.content}
+            assistant_content = second_response.choices[0].message.content
+        else:
+            assistant_content = response_message.content
+        
+        # Save Q&A as a single entry
+        try:
+            avatar_col.insert_one({
+                "userId": uid,
+                "userEmail": email,
+                "user_query": user_message,
+                "assistant_response": assistant_content,
+                "date": _utc_now()
+            })
+        except:
+            pass
 
-        return {"role": "assistant", "content": response_message.content}
+        return {"role": "assistant", "content": assistant_content}
 
     except Exception as e:
         import traceback
         traceback.print_exc()
         return JSONResponse(status_code=500, content={"error": "Chat completion failed"})
 
+
+@app.get("/api/avatar/history")
+async def get_avatar_history(request: Request):
+    """Fetch recent conversation history (Q&A pairs) for the user."""
+    auth_info = await _require_auth(request)
+    uid = auth_info.get("uid")
+    _, _, _, _, _, _, avatar_col = _get_collections()
+    
+    history_cursor = avatar_col.find({"userId": uid}).sort("date", DESCENDING).limit(50)
+    history = list(history_cursor)
+    # history.reverse() # Frontend might want newest first for list
+    
+    return [_serialize_doc(h) for h in history]
 
 # ==================== AVATAR VOICE ANALYSIS ====================
 
@@ -762,35 +820,49 @@ async def analyze_voice(
         # Get user context for analysis
         user_context = await _get_user_context(uid)
 
+        # Get recent conversation history for context
+        _, _, _, _, _, _, avatar_col = _get_collections()
+        history_cursor = avatar_col.find({"userId": uid}).sort("date", DESCENDING).limit(20)
+        history = list(history_cursor)
+        history.reverse() # Oldest first for LLM
+
+        current_time_str = _utc_now().strftime("%A, %B %d, %Y at %H:%M UTC")
+        system_content = f"""You are an empathetic, supportive, and active-listening AI companion. Your primary goal is to help the user navigate their emotions, reduce stress, and improve their overall well-being. 
+
+Today is {current_time_str}.
+
+You have access to the user's past conversational history. Always use this context to provide personalized, consistent support.
+
+CRITICAL RULES AND CONSTRAINTS:
+1. NO DIAGNOSES: You are a supportive guide, not a licensed medical professional. Never diagnose the user with any medical or psychiatric condition (e.g., do not say "You have depression"). 
+2. VOICE-OPTIMIZED OUTPUT: Your responses will be spoken aloud by a Text-to-Speech engine. You MUST write in natural, spoken English. Do not use bullet points, numbered lists, emojis, asterisks, bolding, or markdown. Keep your sentences relatively short and conversational.
+3. CBT FRAMEWORK: When the user expresses negative emotions or stress, gently guide them using Cognitive Behavioral Therapy (CBT) techniques. Help them identify negative thought patterns (cognitive distortions) and guide them to reframe those thoughts into more balanced, realistic perspectives. Ask guiding questions rather than just giving advice.
+4. EARLY WARNING SYSTEM: If the user consistently expresses thoughts of severe hopelessness, extreme burnout, or danger to themselves, you must gently but clearly advise them to seek support from friends, family, or a professional human counselor. 
+5. CONVERSATIONAL CADENCE: Do not monologue. Respond with one or two concise thoughts, followed by a gentle, open-ended question to keep the user talking. Actively validate their feelings before offering a new perspective.
+
+Current Goal: Listen empathetically, validate the user's current emotional state, gracefully reference their past context if relevant, and gently guide them toward a positive, reframed mindset.
+
+Output Format: Return strictly valid JSON with keys: emotion, confidence, suggestions, earlyWarning.
+The 'emotion' field should be a single word (e.g., happy, joyful, sad, anxious, neutral). If the user is being positive or sharing good news, use 'happy' or 'joyful'."""
+
+        messages = [{"role": "system", "content": system_content}]
+        
+        for h in history:
+            messages.append({"role": "user", "content": h.get("user_query", "")})
+            messages.append({"role": "assistant", "content": h.get("assistant_response", "")})
+
+        messages.append({"role": "user", "content": transcript_text})
+
         # Analyze tone and emotion using Groq
-        system_prompt = f"""You are MindSync AI, an empathetic voice assistant. Analyze the user's speech for:
-1. Emotional tone: happy, sad, angry, anxious, frustrated, excited, tired, neutral
-2. Confidence level (0-100)
-3. Suggestions to improve thought patterns (2-3 sentences, compassionate)
-4. Early warning flags if patterns suggest professional support may help
-
-IMPORTANT: Do NOT diagnose mental health conditions. Instead, suggest that "speaking with a professional might help" if concerning patterns are detected.
-
-User Context:
-- Name: {user_context.get('name', 'User')}
-- Occupation: {user_context.get('occupation', 'Not specified')}
-- Recent journal entries: {user_context.get('recent_journals', 'No recent entries')}
-
-Provide your response as JSON with keys: emotion, confidence, suggestions, earlyWarning."""
-
         chat_completion = groq_client.chat.completions.create(
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Transcribed speech: {transcript_text}"}
-            ],
+            messages=messages,
             model="llama-3.1-8b-instant",
             temperature=0.7,
-            max_tokens=500,
+            max_tokens=800,
             response_format={"type": "json_object"}
         )
 
         result_text = chat_completion.choices[0].message.content if chat_completion.choices else ""
-
         try:
             result = json.loads(result_text)
         except json.JSONDecodeError:
@@ -801,16 +873,29 @@ Provide your response as JSON with keys: emotion, confidence, suggestions, early
                 "earlyWarning": ""
             }
 
-        # persist voice analysis
+        # Save Q&A as a single entry
         try:
-            _, _, _, _, voice_analyses_col, _ = _get_collections()
+            suggestions_text = result.get("suggestions", "")
+            if isinstance(suggestions_text, list):
+                suggestions_text = ". ".join(suggestions_text)
+                
+            avatar_col.insert_one({
+                "userId": str(uid or ""),
+                "userEmail": email,
+                "user_query": transcript_text,
+                "assistant_response": suggestions_text,
+                "date": _utc_now()
+            })
+
+            # Also save to voice_analyses for historical tracking if needed
+            _, _, _, _, voice_analyses_col, _, _ = _get_collections()
             voice_doc = {
                 "userId": str(uid or ""),
                 "userEmail": str(email or ""),
                 "transcript": transcript_text,
                 "emotion": result.get("emotion", "neutral"),
                 "confidence": int(result.get("confidence", 0) or 0),
-                "suggestions": result.get("suggestions", ""),
+                "suggestions": suggestions_text,
                 "earlyWarning": result.get("earlyWarning", ""),
                 "date": _utc_now(),
             }

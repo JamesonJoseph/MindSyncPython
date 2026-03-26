@@ -32,9 +32,55 @@ export default function ChatScreen() {
   ]);
   const [inputText, setInputText] = useState('');
   const [loading, setLoading] = useState(false);
+  const [fetchingHistory, setFetchingHistory] = useState(true);
   const flatListRef = useRef<FlatList>(null);
 
   const userId = auth.currentUser?.uid;
+
+  useEffect(() => {
+    const fetchHistory = async () => {
+      if (!userId) {
+        setFetchingHistory(false);
+        return;
+      }
+
+      try {
+        const { authFetch, getApiBaseUrl } = await import('../utils/api');
+        const apiUrl = getApiBaseUrl();
+        const response = await authFetch('/api/avatar/history');
+        
+        if (response.ok) {
+          const data = await response.json();
+          if (data && data.length > 0) {
+            const historyMsgs: Message[] = [];
+            data.forEach((h: any) => {
+              if (h.user_query) {
+                historyMsgs.push({
+                  id: h._id + '_u',
+                  role: 'user',
+                  content: h.user_query
+                });
+              }
+              if (h.assistant_response) {
+                historyMsgs.push({
+                  id: h._id + '_a',
+                  role: 'assistant',
+                  content: h.assistant_response
+                });
+              }
+            });
+            setMessages(historyMsgs);
+          }
+        }
+      } catch (error) {
+        console.error("Failed to fetch chat history:", error);
+      } finally {
+        setFetchingHistory(false);
+      }
+    };
+
+    fetchHistory();
+  }, [userId]);
 
   useEffect(() => {
     // Scroll to bottom when messages change
@@ -67,12 +113,6 @@ export default function ChatScreen() {
     setLoading(true);
 
     try {
-      // Convert to format expected by Groq API
-      const apiMessages = updatedMessages.map(m => ({
-        role: m.role,
-        content: m.content,
-      }));
-
       const apiUrl = getApiBaseUrl();
       console.log(`Sending chat to: ${apiUrl}/api/chat for user: ${userId}`);
 
@@ -82,7 +122,7 @@ export default function ChatScreen() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           userId: userId,
-          messages: apiMessages,
+          message: newUserMsg.content,
         }),
       });
 
