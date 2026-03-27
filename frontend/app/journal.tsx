@@ -14,7 +14,7 @@ import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useRouter, Stack } from "expo-router";
 import { auth } from "../firebaseConfig";
-import { getApiBaseUrl } from "../utils/api";
+import { getApiBaseUrl, parseApiResponse } from "../utils/api";
 
 // --- Mock Heatmap Functions ---
 const generateMockHeatmapData = () => {
@@ -39,6 +39,9 @@ const getColorForIntensity = (intensity: number) => {
     default: return "#ECECEC";
   }
 };
+
+const isTimeoutError = (error: unknown) =>
+  error instanceof Error && /network request timed out/i.test(error.message);
 
 export default function JournalScreen() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -65,15 +68,19 @@ export default function JournalScreen() {
       const apiUrl = getApiBaseUrl();
       const { authFetch } = await import('../utils/api');
       const response = await authFetch(`${apiUrl}/api/journals?userId=${user.uid}`);
-      const data = await response.json();
+      const data: any = await parseApiResponse<any>(response);
       
-      if (!Array.isArray(data)) {
-        console.error("Fetched data is not an array:", data);
-        setJournals([]);
-        return;
+      if (!response.ok) {
+        const message =
+          typeof data?.error === "string" ? data.error :
+          typeof data?.detail === "string" ? data.detail :
+          "Failed to fetch journals.";
+        throw new Error(message);
       }
-      
-      const formattedData = data.map((item: any) => {
+
+      const items = Array.isArray(data) ? data : [];
+
+      const formattedData = items.map((item: any) => {
         const dateObj = new Date(item.date);
         return {
           id: item._id,
@@ -85,7 +92,10 @@ export default function JournalScreen() {
       });
       setJournals(formattedData);
     } catch (error) {
-      console.error("Fetch error:", error);
+      if (!isTimeoutError(error)) {
+        console.warn("Fetch error:", error);
+      }
+      setJournals([]);
     } finally {
       setLoading(false);
       setRefreshing(false);

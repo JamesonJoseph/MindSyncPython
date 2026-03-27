@@ -1,29 +1,98 @@
+import Constants from 'expo-constants';
 import { auth } from '../firebaseConfig';
 
+const API_PORT = '5000';
+
+function normalizeBaseUrl(value: string | null | undefined): string | null {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) {
+    return null;
+  }
+  return trimmed.replace(/\/+$/, '');
+}
+
+function getExpoHostApiBaseUrl(): string | null {
+  const expoHostUri =
+    Constants.expoConfig?.hostUri ||
+    (Constants as typeof Constants & {
+      manifest2?: { extra?: { expoGo?: { debuggerHost?: string } } };
+      manifest?: { debuggerHost?: string };
+    }).manifest2?.extra?.expoGo?.debuggerHost ||
+    (Constants as typeof Constants & {
+      manifest?: { debuggerHost?: string };
+    }).manifest?.debuggerHost ||
+    '';
+
+  const host = String(expoHostUri).split(':')[0].trim();
+  if (!host) {
+    return null;
+  }
+
+  return `http://${host}:${API_PORT}`;
+}
+
+export function getApiBaseUrlCandidates(): string[] {
+  const candidates = [
+    getExpoHostApiBaseUrl(),
+    normalizeBaseUrl(process.env.EXPO_PUBLIC_API_URL),
+  ].filter((value): value is string => Boolean(value));
+
+  return [...new Set(candidates)];
+}
+
 export function getApiBaseUrl(): string {
-  const rawValue = (process.env.EXPO_PUBLIC_API_URL || "").trim();
-  if (!rawValue) {
+  const [primaryUrl] = getApiBaseUrlCandidates();
+  if (!primaryUrl) {
     throw new Error(
-      "EXPO_PUBLIC_API_URL is missing. Set EXPO_PUBLIC_API_URL in your environment, e.g. EXPO_PUBLIC_API_URL=http://192.168.1.7:5000"
+      'EXPO_PUBLIC_API_URL is missing and no Expo host could be detected. Set EXPO_PUBLIC_API_URL, e.g. EXPO_PUBLIC_API_URL=http://192.168.1.7:5000'
     );
   }
-  return rawValue.replace(/\/+$/, "");
+  return primaryUrl;
+}
+
+function buildUrl(baseUrl: string, input: string): string {
+  return input.startsWith('http')
+    ? input
+    : `${baseUrl.replace(/\/$/, '')}${input.startsWith('/') ? '' : '/'}${input}`;
+}
+
+function buildRetryUrls(input: string): string[] {
+  const baseCandidates = getApiBaseUrlCandidates();
+
+  if (!input.startsWith('http')) {
+    return baseCandidates.map((baseUrl) => buildUrl(baseUrl, input));
+  }
+
+  try {
+    const parsed = new URL(input);
+    const pathWithQuery = `${parsed.pathname}${parsed.search}`;
+    return [input, ...baseCandidates.map((baseUrl) => `${baseUrl}${pathWithQuery}`)];
+  } catch {
+    return [input];
+  }
+}
+
+function isNetworkError(error: unknown): boolean {
+  return error instanceof Error && /network request failed|network request timed out|failed to fetch/i.test(error.message);
 }
 
 // Helper that attaches Firebase ID token (if present) and default headers
 export async function authFetch(input: string, init: RequestInit = {}) {
-  const apiBase = getApiBaseUrl();
-  const url = input.startsWith('http') ? input : `${apiBase.replace(/\/$/, '')}${input.startsWith('/') ? '' : '/'}${input}`;
-
   const headers: Record<string, string> = {
-    ...(init.headers as Record<string, string> || {}),
+    ...((init.headers as Record<string, string>) || {}),
   };
 
   try {
     const user = auth.currentUser;
     if (user) {
-      const token = await user.getIdToken();
+      // Use the cached token first to avoid a network round-trip on every
+      // request. Firebase refreshes it only when required.
+      const token = await user.getIdToken(false);
       if (token) headers['Authorization'] = `Bearer ${token}`;
+      headers['X-User-Id'] = user.uid;
+      if (user.email) {
+        headers['X-User-Email'] = user.email;
+      }
     }
   } catch (e) {
     // ignore token errors; proceed without auth header
@@ -35,5 +104,46 @@ export async function authFetch(input: string, init: RequestInit = {}) {
     headers,
   };
 
-  return fetch(url, opts);
+  const retryUrls = [...new Set(buildRetryUrls(input))];
+  let lastError: unknown = null;
+
+  for (const url of retryUrls) {
+    try {
+      const response = await fetch(url, opts);
+      const contentType = response.headers.get('content-type') || '';
+
+      // Retry alternate base URLs when the first endpoint returns a non-JSON
+      // server error page or plain-text error body.
+      if (!response.ok && !/application\/json/i.test(contentType) && retryUrls.length > 1) {
+        lastError = new Error(`Non-JSON error response from ${url}`);
+        continue;
+      }
+
+      return response;
+    } catch (error) {
+      lastError = error;
+      if (!isNetworkError(error)) {
+        throw error;
+      }
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error('Network request failed');
+}
+
+export async function parseApiResponse<T = any>(response: Response): Promise<T> {
+  const rawText = await response.text();
+
+  if (!rawText.trim()) {
+    return {} as T;
+  }
+
+  try {
+    return JSON.parse(rawText) as T;
+  } catch {
+    return {
+      error: rawText.trim(),
+      raw: rawText,
+    } as T;
+  }
 }

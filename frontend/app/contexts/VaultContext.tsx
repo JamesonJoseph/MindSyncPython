@@ -3,63 +3,54 @@ import * as Crypto from 'expo-crypto';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as LocalAuthentication from 'expo-local-authentication';
 
-// Simple base64 encoding/decoding for React Native
-const base64Encode = (str: string): string => {
+const legacyBase64Decode = (str: string): string => {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
   let result = '';
   let i = 0;
-  
-  while (i < str.length) {
-    const a = str.charCodeAt(i++);
-    const b = i < str.length ? str.charCodeAt(i++) : 0;
-    const c = i < str.length ? str.charCodeAt(i++) : 0;
-    
-    const triplet = (a << 16) | (b << 8) | c;
-    
-    result += chars[(triplet >> 18) & 0x3F];
-    result += chars[(triplet >> 12) & 0x3F];
-    result += i > str.length + 1 ? '=' : chars[(triplet >> 6) & 0x3F];
-    result += i > str.length ? '=' : chars[triplet & 0x3F];
-  }
-  
-  return result;
-};
+  const input = String(str || '').replace(/=/g, '');
 
-const base64Decode = (str: string): string => {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-  let result = '';
-  let i = 0;
-  
-  str = str.replace(/=/g, '');
-  
-  while (i < str.length) {
-    const a = chars.indexOf(str[i++]);
-    const b = chars.indexOf(str[i++]);
-    const c = chars.indexOf(str[i++]);
-    const d = chars.indexOf(str[i++]);
-    
-    const triplet = (a << 18) | (b << 12) | (c << 6) | d;
-    
+  while (i < input.length) {
+    const a = chars.indexOf(input[i++]);
+    const b = chars.indexOf(input[i++]);
+    const c = chars.indexOf(input[i++]);
+    const d = chars.indexOf(input[i++]);
+
+    if (a < 0 || b < 0) {
+      break;
+    }
+
+    const triplet = (a << 18) | (b << 12) | ((c < 0 ? 0 : c) << 6) | (d < 0 ? 0 : d);
+
     result += String.fromCharCode((triplet >> 16) & 0xFF);
-    if (c !== -1) {
+    if (c >= 0) {
       result += String.fromCharCode((triplet >> 8) & 0xFF);
     }
-    if (d !== -1) {
+    if (d >= 0) {
       result += String.fromCharCode(triplet & 0xFF);
     }
   }
-  
+
   return result;
 };
 
-import { getApiBaseUrl } from '../../utils/api';
+import { parseApiResponse } from '../../utils/api';
+
+export type VaultEntryType = 'password' | 'url' | 'pdf' | 'text';
 
 export interface VaultEntry {
   id: string;
   _id?: string;
   title: string;
-  username: string;
-  password: string;
+  entryType: VaultEntryType;
+  username?: string;
+  password?: string;
+  url?: string;
+  content?: string;
+  notes?: string;
+  fileName?: string;
+  mimeType?: string;
+  fileSize?: number;
+  storagePath?: string;
   category: string;
   createdAt: number;
 }
@@ -68,7 +59,7 @@ interface VaultContextType {
   entries: VaultEntry[];
   isLocked: boolean;
   isLoading: boolean;
-  addEntry: (entry: Omit<VaultEntry, 'id' | 'createdAt'>) => Promise<void>;
+  addEntry: (entry: Omit<VaultEntry, 'id' | 'createdAt' | 'entryType'> & { entryType?: VaultEntryType }) => Promise<void>;
   deleteEntry: (id: string) => Promise<void>;
   updateEntry: (id: string, entry: Partial<VaultEntry>) => Promise<void>;
   unlockVault: () => Promise<boolean>;
@@ -82,6 +73,52 @@ const VaultContext = createContext<VaultContextType | undefined>(undefined);
 const ENCRYPTION_KEY_ID = 'mindSync_vault_key';
 const STORAGE_KEY = 'mindSync_vault_entries';
 
+function normalizeEntry(raw: any): VaultEntry | null {
+  if (!raw || typeof raw !== 'object') {
+    return null;
+  }
+
+  const inferredType: VaultEntryType =
+    raw.entryType === 'password' || raw.entryType === 'url' || raw.entryType === 'pdf' || raw.entryType === 'text'
+      ? raw.entryType
+      : raw.password
+        ? 'password'
+        : raw.url
+          ? 'url'
+          : 'text';
+
+  return {
+    id: String(raw.id || Crypto.randomUUID()),
+    _id: typeof raw._id === 'string' ? raw._id : undefined,
+    title: String(raw.title || 'Untitled'),
+    entryType: inferredType,
+    username: String(raw.username || ''),
+    password: String(raw.password || ''),
+    url: String(raw.url || ''),
+    content: String(raw.content || ''),
+    notes: String(raw.notes || ''),
+    fileName: String(raw.fileName || ''),
+    mimeType: String(raw.mimeType || ''),
+    fileSize: Number(raw.fileSize || 0),
+    storagePath: String(raw.storagePath || ''),
+    category: String(raw.category || 'General'),
+    createdAt: Number(raw.createdAt || Date.now()),
+  };
+}
+
+function parseStoredEntries(raw: string): VaultEntry[] {
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return parsed.map(normalizeEntry).filter((entry): entry is VaultEntry => entry !== null);
+    }
+    const single = normalizeEntry(parsed);
+    return single ? [single] : [];
+  } catch {
+    return [];
+  }
+}
+
 export function VaultProvider({ children }: { children: ReactNode }) {
   const [entries, setEntries] = useState<VaultEntry[]>([]);
   const [isLocked, setIsLocked] = useState(true);
@@ -92,27 +129,39 @@ export function VaultProvider({ children }: { children: ReactNode }) {
     initializeVault();
   }, []);
 
+  const getActiveEncryptionKey = async (): Promise<string> => {
+    if (encryptionKey) {
+      return encryptionKey;
+    }
+
+    let key = await AsyncStorage.getItem(ENCRYPTION_KEY_ID);
+    if (!key) {
+      key = Crypto.randomUUID();
+      await AsyncStorage.setItem(ENCRYPTION_KEY_ID, key);
+    }
+
+    setEncryptionKey(key);
+    return key;
+  };
+
   const initializeVault = async () => {
     try {
-      let key = await AsyncStorage.getItem(ENCRYPTION_KEY_ID);
-      if (!key) {
-        key = Crypto.randomUUID();
-        await AsyncStorage.setItem(ENCRYPTION_KEY_ID, key);
-      }
+      const key = await getActiveEncryptionKey();
       setEncryptionKey(key);
       
       // Try to load from backend
       try {
         const { authFetch } = await import('../../utils/api');
-        const res = await authFetch(`${getApiBaseUrl()}/api/documents`);
+        const res = await authFetch('/api/documents');
         if (res.ok) {
-          const backendDocs = await res.json();
+          const backendDocs = await parseApiResponse<any[]>(res);
           const decryptedEntries = await Promise.all(backendDocs.map(async (doc: any) => {
-            if (doc.type !== 'vault') return null;
+            if (doc.type !== 'vault' && doc.type !== 'secure-doc') return null;
             try {
               const decryptedData = await decryptData(doc.content, key!);
-              const parsed = JSON.parse(decryptedData);
-              return { ...parsed, _id: doc._id };
+              const parsedEntries = parseStoredEntries(decryptedData);
+              const firstEntry = parsedEntries[0];
+              return firstEntry ? { ...firstEntry, _id: doc._id } : null;
             } catch (e) {
               return null;
             }
@@ -132,7 +181,7 @@ export function VaultProvider({ children }: { children: ReactNode }) {
       const storedData = await AsyncStorage.getItem(STORAGE_KEY);
       if (storedData) {
         const decrypted = await decryptData(storedData, key);
-        setEntries(JSON.parse(decrypted));
+        setEntries(parseStoredEntries(decrypted));
       }
     } catch (error) {
       console.log('Error initializing vault:', error);
@@ -146,13 +195,42 @@ export function VaultProvider({ children }: { children: ReactNode }) {
       Crypto.CryptoDigestAlgorithm.SHA256,
       key + data
     );
-    return base64Encode(data + ':' + digest);
+    return JSON.stringify({
+      version: 2,
+      data,
+      hash: digest,
+    });
   };
 
   const decryptData = async (encryptedData: string, key: string): Promise<string> => {
     try {
-      const decoded = base64Decode(encryptedData);
-      const [data, hash] = decoded.split(':');
+      const trimmed = String(encryptedData || '').trim();
+      if (!trimmed) {
+        return '[]';
+      }
+
+      if (trimmed.startsWith('{')) {
+        const parsedEnvelope = JSON.parse(trimmed);
+        const data = String(parsedEnvelope?.data || '');
+        const hash = String(parsedEnvelope?.hash || '');
+        const verifyHash = await Crypto.digestStringAsync(
+          Crypto.CryptoDigestAlgorithm.SHA256,
+          key + data
+        );
+        if (verifyHash === hash) {
+          return data;
+        }
+        return '[]';
+      }
+
+      // Backward compatibility for older stored payloads.
+      const legacyDecoded = legacyBase64Decode(trimmed);
+      const separatorIndex = legacyDecoded.lastIndexOf(':');
+      if (separatorIndex === -1) {
+        return '[]';
+      }
+      const data = legacyDecoded.slice(0, separatorIndex);
+      const hash = legacyDecoded.slice(separatorIndex + 1);
       const verifyHash = await Crypto.digestStringAsync(
         Crypto.CryptoDigestAlgorithm.SHA256,
         key + data
@@ -168,7 +246,8 @@ export function VaultProvider({ children }: { children: ReactNode }) {
 
   const saveEntries = async (newEntries: VaultEntry[]) => {
     try {
-      const encrypted = await encryptData(JSON.stringify(newEntries), encryptionKey);
+      const key = await getActiveEncryptionKey();
+      const encrypted = await encryptData(JSON.stringify(newEntries), key);
       await AsyncStorage.setItem(STORAGE_KEY, encrypted);
       setEntries(newEntries);
     } catch (error) {
@@ -176,33 +255,43 @@ export function VaultProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  const addEntry = async (entry: Omit<VaultEntry, 'id' | 'createdAt'>) => {
+  const addEntry = async (entry: Omit<VaultEntry, 'id' | 'createdAt' | 'entryType'> & { entryType?: VaultEntryType }) => {
+    const key = await getActiveEncryptionKey();
     const newEntry: VaultEntry = {
       ...entry,
+      entryType: entry.entryType || 'password',
       id: Crypto.randomUUID(),
       createdAt: Date.now(),
     };
     const updatedEntries = [newEntry, ...entries];
     setEntries(updatedEntries);
+
+    try {
+      const encryptedAll = await encryptData(JSON.stringify(updatedEntries), key);
+      await AsyncStorage.setItem(STORAGE_KEY, encryptedAll);
+    } catch (e) {
+      console.log('Local vault save failed', e);
+    }
     
     try {
-      const encryptedContent = await encryptData(JSON.stringify(newEntry), encryptionKey);
+      const encryptedContent = await encryptData(JSON.stringify(newEntry), key);
       const { authFetch } = await import('../../utils/api');
-      const res = await authFetch(`${getApiBaseUrl()}/api/documents`, {
+      const res = await authFetch('/api/documents', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           title: newEntry.title,
           content: encryptedContent,
-          type: 'vault'
+          type: 'secure-doc'
         })
       });
       if (res.ok) {
-        const saved = await res.json();
-        setEntries(prev => prev.map(e => e.id === newEntry.id ? { ...e, _id: saved._id } : e));
+        const saved = await parseApiResponse<any>(res);
+        const syncedEntries = updatedEntries.map(e => e.id === newEntry.id ? { ...e, _id: saved._id } : e);
+        setEntries(syncedEntries);
+        const encryptedSynced = await encryptData(JSON.stringify(syncedEntries), key);
+        await AsyncStorage.setItem(STORAGE_KEY, encryptedSynced);
       }
-      const encryptedAll = await encryptData(JSON.stringify(updatedEntries), encryptionKey);
-      await AsyncStorage.setItem(STORAGE_KEY, encryptedAll);
     } catch (e) {
       console.log('Sync to backend failed', e);
     }
@@ -213,13 +302,20 @@ export function VaultProvider({ children }: { children: ReactNode }) {
     const updatedEntries = entries.filter(e => e.id !== id);
     setEntries(updatedEntries);
     try {
-      if (entryToDelete?._id) {
+      const key = await getActiveEncryptionKey();
+      if (entryToDelete?.entryType === 'pdf' && entryToDelete.storagePath) {
         const { authFetch } = await import('../../utils/api');
-        await authFetch(`${getApiBaseUrl()}/api/documents/${entryToDelete._id}`, {
+        await authFetch(`/api/documents/file?path=${encodeURIComponent(entryToDelete.storagePath)}`, {
           method: 'DELETE'
         });
       }
-      const encrypted = await encryptData(JSON.stringify(updatedEntries), encryptionKey);
+      if (entryToDelete?._id) {
+        const { authFetch } = await import('../../utils/api');
+        await authFetch(`/api/documents/${entryToDelete._id}`, {
+          method: 'DELETE'
+        });
+      }
+      const encrypted = await encryptData(JSON.stringify(updatedEntries), key);
       await AsyncStorage.setItem(STORAGE_KEY, encrypted);
     } catch (e) {
       console.log('Delete from backend failed', e);
@@ -227,8 +323,31 @@ export function VaultProvider({ children }: { children: ReactNode }) {
   };
 
   const updateEntry = async (id: string, updates: Partial<VaultEntry>) => {
+    const existingEntry = entries.find(e => e.id === id);
     const newEntries = entries.map(e => e.id === id ? { ...e, ...updates } : e);
     await saveEntries(newEntries);
+
+    const updatedEntry = newEntries.find(e => e.id === id);
+    if (!existingEntry?._id || !updatedEntry) {
+      return;
+    }
+
+    try {
+      const key = await getActiveEncryptionKey();
+      const encryptedContent = await encryptData(JSON.stringify(updatedEntry), key);
+      const { authFetch } = await import('../../utils/api');
+      await authFetch(`/api/documents/${existingEntry._id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: updatedEntry.title,
+          content: encryptedContent,
+          type: 'secure-doc',
+        }),
+      });
+    } catch (error) {
+      console.log('Update backend sync failed', error);
+    }
   };
 
   const unlockVault = async (): Promise<boolean> => {
@@ -256,8 +375,13 @@ export function VaultProvider({ children }: { children: ReactNode }) {
     const lowerQuery = query.toLowerCase();
     return entries.filter(e => 
       e.title.toLowerCase().includes(lowerQuery) ||
-      e.username.toLowerCase().includes(lowerQuery) ||
-      e.category.toLowerCase().includes(lowerQuery)
+      e.category.toLowerCase().includes(lowerQuery) ||
+      String(e.username || '').toLowerCase().includes(lowerQuery) ||
+      String(e.url || '').toLowerCase().includes(lowerQuery) ||
+      String(e.content || '').toLowerCase().includes(lowerQuery) ||
+      String(e.notes || '').toLowerCase().includes(lowerQuery) ||
+      String(e.fileName || '').toLowerCase().includes(lowerQuery) ||
+      e.entryType.toLowerCase().includes(lowerQuery)
     );
   };
 

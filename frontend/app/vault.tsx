@@ -104,7 +104,7 @@ export default function VaultScreen() {
           {isRevealed && (
             <TouchableOpacity 
               style={styles.actionButton}
-              onPress={() => handleCopy(item.password)}
+              onPress={() => handleCopy(item.password || '')}
             >
               <Ionicons name="copy-outline" size={20} color="#00E0C6" />
             </TouchableOpacity>

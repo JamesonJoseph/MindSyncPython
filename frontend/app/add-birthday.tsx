@@ -7,30 +7,72 @@ import {
   TextInput,
   ScrollView,
   Modal,
+  Alert,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
+import { useRouter, useLocalSearchParams } from 'expo-router';
 import { auth } from '../firebaseConfig';
 import { getApiBaseUrl } from '../utils/api';
+import { toISTISOString, getISTNow } from '../utils/timezone';
 
 export default function AddBirthdayScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const userId = auth.currentUser?.uid || '';
-  
+  const params = useLocalSearchParams();
+
   const [name, setName] = useState('');
-  const [selectedDate, setSelectedDate] = useState(new Date());
+  const [relation, setRelation] = useState('');
+  const [selectedDate, setSelectedDate] = useState(() => {
+    if (params.date) {
+      return new Date(params.date as string + 'T00:00:00+05:30');
+    }
+    return getISTNow();
+  });
   const [showDatePicker, setShowDatePicker] = useState(false);
-  const [pickerMonth, setPickerMonth] = useState(new Date());
+  const [pickerMonth, setPickerMonth] = useState(() => {
+    if (params.date) {
+      return new Date(params.date as string + 'T00:00:00+05:30');
+    }
+    return getISTNow();
+  });
   const [selectedColor, setSelectedColor] = useState('#FF6B6B');
   const [notifications, setNotifications] = useState([
     { id: '1', label: 'On the day at 9 AM', enabled: true },
     { id: '2', label: '1 week before at 9 AM', enabled: true },
   ]);
   const [showAddNotification, setShowAddNotification] = useState(false);
-  const [newNotificationLabel, setNewNotificationLabel] = useState('');
-  const [newNotificationTime, setNewNotificationTime] = useState('9 AM');
+  const [newNotificationLabel, setNewNotificationLabel] = useState('On the day at');
+  const [notificationHour, setNotificationHour] = useState(9);
+  const [notificationMinute, setNotificationMinute] = useState(0);
+  const [notificationPeriod, setNotificationPeriod] = useState<'AM' | 'PM'>('AM');
+  const [showTimePicker, setShowTimePicker] = useState(false);
+
+  // Time picker functions
+  const incrementHour = () => {
+    setNotificationHour(prev => prev >= 12 ? 1 : prev + 1);
+  };
+
+  const decrementHour = () => {
+    setNotificationHour(prev => prev <= 1 ? 12 : prev - 1);
+  };
+
+  const incrementMinute = () => {
+    setNotificationMinute(prev => prev >= 59 ? 0 : prev + 1);
+  };
+
+  const decrementMinute = () => {
+    setNotificationMinute(prev => prev <= 0 ? 59 : prev - 1);
+  };
+
+  const togglePeriod = () => {
+    setNotificationPeriod(prev => prev === 'AM' ? 'PM' : 'AM');
+  };
+
+  const confirmTime = () => {
+    setShowTimePicker(false);
+  };
 
   const notificationOptions = [
     'On the day at',
@@ -42,9 +84,8 @@ export default function AddBirthdayScreen() {
     '1 month before at',
   ];
 
-  const timeOptions = ['6 AM', '7 AM', '8 AM', '9 AM', '10 AM', '11 AM', '12 PM', '1 PM', '2 PM', '3 PM', '4 PM', '5 PM', '6 PM', '7 PM', '8 PM'];
-
-  const colors = ['#FF6B6B', '#00E0C6', '#FF9500', '#5856D6', '#34C759', '#007AFF'];
+  const colors = ['#FF6B6B', '#00E0C6', '#FF9500', '#5856D6', '#34C759', '#007AFF', '#FFD700', '#FF69B4'];
+  const [activeTab, setActiveTab] = useState<'task' | 'event' | 'birthday'>('birthday');
 
   const getDaysInMonth = (date: Date) => new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
   const getFirstDayOfMonth = (date: Date) => new Date(date.getFullYear(), date.getMonth(), 1).getDay();
@@ -65,39 +106,46 @@ export default function AddBirthdayScreen() {
 
   const handleSave = async () => {
     if (!name.trim()) {
-      alert('Please enter a name');
+      Alert.alert('Error', 'Please enter a name');
       return;
     }
-    
+
+    // Build date string in IST format
+    const dateStr = selectedDate.toISOString().split('T')[0];
+    const isoDate = toISTISOString(dateStr);
+
     const birthdayData = {
-      id: Date.now().toString(),
+      userId,
       name: name.trim(),
-      date: selectedDate.toISOString().split('T')[0],
+      relation: relation.trim(),
+      date: isoDate,
       color: selectedColor,
       notifications: notifications.filter(n => n.enabled).map(n => n.label)
     };
-    
+
+    console.log('Saving birthday (IST):', birthdayData);
+
     try {
       const { authFetch } = await import('../utils/api');
       const res = await authFetch(`${getApiBaseUrl()}/api/birthdays`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          userId, 
-          ...birthdayData
-        }),
+        body: JSON.stringify(birthdayData),
       });
-      
+
       if (res.ok) {
-        router.back();
+        Alert.alert('Success', 'Birthday saved successfully!', [
+          { text: 'OK', onPress: () => router.back() }
+        ]);
       } else {
-        console.log('API not available, saving locally');
+        const responseData = await res.json().catch(() => null);
+        const errorMsg = responseData?.error || responseData?.detail || 'Failed to save birthday';
+        Alert.alert('Error', errorMsg);
       }
-    } catch (error) {
-      console.log('Error saving birthday, saving to local storage', error);
+    } catch (error: any) {
+      console.log('Error saving birthday', error);
+      Alert.alert('Error', `Failed to save birthday: ${error.message || 'Network error'}`);
     }
-    
-    router.back();
   };
 
   const toggleNotification = (id: string) => {
@@ -106,19 +154,22 @@ export default function AddBirthdayScreen() {
     );
   };
 
-  const addNotification = () => {
-    if (newNotificationLabel && newNotificationTime) {
-      const label = `${newNotificationLabel} ${newNotificationTime}`;
-      setNotifications(prev => [...prev, { 
-        id: Date.now().toString(), 
-        label, 
-        enabled: true 
-      }]);
-      setShowAddNotification(false);
-      setNewNotificationLabel('On the day at');
-      setNewNotificationTime('9 AM');
-    }
-  };
+      const addNotification = () => {
+        if (newNotificationLabel) {
+          const timeStr = `${notificationHour.toString().padStart(2, '0')}:${notificationMinute.toString().padStart(2, '0')} ${notificationPeriod}`;
+          const label = `${newNotificationLabel} ${timeStr}`;
+          setNotifications(prev => [...prev, { 
+            id: Date.now().toString(), 
+            label, 
+            enabled: true 
+          }]);
+          setShowAddNotification(false);
+          setNewNotificationLabel('On the day at');
+          setNotificationHour(9);
+          setNotificationMinute(0);
+          setNotificationPeriod('AM');
+        }
+      };
 
   const removeNotification = (id: string) => {
     setNotifications(prev => prev.filter(n => n.id !== id));
@@ -145,14 +196,62 @@ export default function AddBirthdayScreen() {
       </View>
 
       <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
+        {/* Tab Switcher */}
+        <View style={styles.tabsContainer}>
+          <TouchableOpacity 
+            style={[styles.tab, activeTab === 'task' && styles.tabActive]}
+            onPress={() => router.replace('/add-task')}
+          >
+            <Ionicons name="checkbox-outline" size={20} color={activeTab === 'task' ? "#00E0C6" : "#999"} />
+            <Text style={[styles.tabText, activeTab === 'task' && { color: '#00E0C6' }]}>Task</Text>
+          </TouchableOpacity>
+          <TouchableOpacity 
+            style={[styles.tab, activeTab === 'event' && styles.tabActiveEvent]}
+            onPress={() => router.replace('/add-event')}
+          >
+            <Ionicons name="calendar-outline" size={20} color={activeTab === 'event' ? "#FF9500" : "#999"} />
+            <Text style={[styles.tabText, activeTab === 'event' && { color: '#FF9500' }]}>Event</Text>
+          </TouchableOpacity>
+          <TouchableOpacity 
+            style={[styles.tab, activeTab === 'birthday' && styles.tabActiveBirthday]}
+            onPress={() => {}}
+          >
+            <Ionicons name="gift-outline" size={20} color={activeTab === 'birthday' ? "#FF6B6B" : "#999"} />
+            <Text style={[styles.tabText, activeTab === 'birthday' && { color: '#FF6B6B' }]}>Birthday</Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Date Display */}
+        <View style={styles.dateDisplayBanner}>
+          <Ionicons name="calendar" size={20} color="#FF6B6B" />
+          <Text style={styles.dateDisplayBannerText}>
+            Adding birthday for: {selectedDate.toLocaleDateString('en-US', { 
+              month: 'short', 
+              day: 'numeric'
+            })}
+          </Text>
+        </View>
+
         {/* Add Name */}
         <View style={styles.section}>
-          <Text style={styles.label}>Add name</Text>
+          <Text style={styles.label}>Name</Text>
           <TextInput
             style={styles.input}
             placeholder="Enter name"
             value={name}
             onChangeText={setName}
+            placeholderTextColor="#999"
+          />
+        </View>
+
+        {/* Relation */}
+        <View style={styles.section}>
+          <Text style={styles.label}>Relation</Text>
+          <TextInput
+            style={styles.input}
+            placeholder="e.g., Friend, Family, Colleague"
+            value={relation}
+            onChangeText={setRelation}
             placeholderTextColor="#999"
           />
         </View>
@@ -169,7 +268,7 @@ export default function AddBirthdayScreen() {
           </TouchableOpacity>
           <TouchableOpacity style={[styles.tab, styles.tabActive]}>
             <Ionicons name="gift" size={20} color="#FF6B6B" />
-            <Text style={[styles.tabText, styles.tabTextActive]}>Birthday</Text>
+            <Text style={[styles.tabText, { color: '#FF6B6B' }]}>Birthday</Text>
           </TouchableOpacity>
         </View>
 
@@ -335,28 +434,75 @@ export default function AddBirthdayScreen() {
               ))}
             </View>
 
-            <Text style={[styles.modalLabel, { marginTop: 16 }]}>Time</Text>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.timeScrollView}>
-              <View style={styles.optionsRow}>
-                {timeOptions.map((time) => (
-                  <TouchableOpacity
-                    key={time}
-                    style={[
-                      styles.timeButton,
-                      newNotificationTime === time && styles.timeButtonSelected
-                    ]}
-                    onPress={() => setNewNotificationTime(time)}
-                  >
-                    <Text style={[
-                      styles.timeButtonText,
-                      newNotificationTime === time && styles.timeButtonTextSelected
-                    ]}>
-                      {time}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-            </ScrollView>
+            <Text style={[styles.modalLabel, { marginTop: 16 }]}>Time (optional)</Text>
+            <TouchableOpacity style={styles.timeSelector} onPress={() => setShowTimePicker(true)}>
+                <Ionicons name="time" size={20} color="#00E0C6" />
+                <Text style={styles.timeSelectorText}>
+                    {notificationHour.toString().padStart(2, '0')}:{notificationMinute.toString().padStart(2, '0')} {notificationPeriod}
+                </Text>
+                <Ionicons name="chevron-forward" size={20} color="#999" />
+            </TouchableOpacity>
+
+            {/* Time Picker Modal */}
+            <Modal visible={showTimePicker} transparent animationType="slide">
+                <View style={styles.modalOverlay}>
+                    <View style={[styles.timePickerModal, { paddingBottom: insets.bottom + 20 }]}>
+                        <View style={styles.modalHeader}>
+                            <Text style={styles.modalTitle}>Select Time</Text>
+                            <TouchableOpacity onPress={() => setShowTimePicker(false)}>
+                                <Ionicons name="close" size={24} color="#333" />
+                            </TouchableOpacity>
+                        </View>
+
+                        <View style={styles.timePickerContainer}>
+                            {/* Hour Column */}
+                            <View style={styles.timeColumn}>
+                                <TouchableOpacity style={styles.arrowButton} onPress={incrementHour}>
+                                    <Ionicons name="chevron-up" size={32} color="#00E0C6" />
+                                </TouchableOpacity>
+                                <View style={styles.timeValueBox}>
+                                    <Text style={styles.timeValue}>{notificationHour.toString().padStart(2, '0')}</Text>
+                                </View>
+                                <TouchableOpacity style={styles.arrowButton} onPress={decrementHour}>
+                                    <Ionicons name="chevron-down" size={32} color="#00E0C6" />
+                                </TouchableOpacity>
+                            </View>
+
+                            <Text style={styles.timeColon}>:</Text>
+
+                            {/* Minute Column */}
+                            <View style={styles.timeColumn}>
+                                <TouchableOpacity style={styles.arrowButton} onPress={incrementMinute}>
+                                    <Ionicons name="chevron-up" size={32} color="#00E0C6" />
+                                </TouchableOpacity>
+                                <View style={styles.timeValueBox}>
+                                    <Text style={styles.timeValue}>{notificationMinute.toString().padStart(2, '0')}</Text>
+                                </View>
+                                <TouchableOpacity style={styles.arrowButton} onPress={decrementMinute}>
+                                    <Ionicons name="chevron-down" size={32} color="#00E0C6" />
+                                </TouchableOpacity>
+                            </View>
+
+                            {/* AM/PM Column */}
+                            <View style={styles.timeColumn}>
+                                <TouchableOpacity style={styles.arrowButton} onPress={togglePeriod}>
+                                    <Ionicons name="chevron-up" size={32} color="#00E0C6" />
+                                </TouchableOpacity>
+                                <TouchableOpacity style={styles.timeValueBoxPeriod} onPress={togglePeriod}>
+                                    <Text style={styles.timeValuePeriod}>{notificationPeriod}</Text>
+                                </TouchableOpacity>
+                                <TouchableOpacity style={styles.arrowButton} onPress={togglePeriod}>
+                                    <Ionicons name="chevron-down" size={32} color="#00E0C6" />
+                                </TouchableOpacity>
+                            </View>
+                        </View>
+
+                        <TouchableOpacity style={styles.confirmTimeButton} onPress={confirmTime}>
+                            <Text style={styles.confirmTimeText}>Confirm Time</Text>
+                        </TouchableOpacity>
+                    </View>
+                </View>
+            </Modal>
 
             <TouchableOpacity style={styles.addButton} onPress={addNotification}>
               <Text style={styles.addButtonText}>Add Notification</Text>
@@ -437,7 +583,13 @@ const styles = StyleSheet.create({
     borderRadius: 10,
   },
   tabActive: {
-    backgroundColor: '#FFF0F0',
+    backgroundColor: '#E6FFFA',
+  },
+  tabActiveEvent: {
+    backgroundColor: '#FFF4E6',
+  },
+  tabActiveBirthday: {
+    backgroundColor: '#FFE6E6',
   },
   tabText: {
     fontSize: 14,
@@ -445,8 +597,20 @@ const styles = StyleSheet.create({
     color: '#999',
     marginLeft: 6,
   },
-  tabTextActive: {
-    color: '#FF6B6B',
+  dateDisplayBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFE6E6',
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    marginTop: 16,
+  },
+  dateDisplayBannerText: {
+    fontSize: 14,
+    color: '#C62828',
+    marginLeft: 10,
+    fontWeight: '500',
   },
   datePicker: {
     flexDirection: 'row',

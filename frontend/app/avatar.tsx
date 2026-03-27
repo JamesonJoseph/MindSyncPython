@@ -17,6 +17,7 @@ import { useRouter } from 'expo-router';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import Animated, { useAnimatedStyle, withTiming, useSharedValue, Easing } from 'react-native-reanimated';
 import * as KeepAwake from 'expo-keep-awake';
+import { activateKeepAwakeAsync, deactivateKeepAwakeAsync } from 'expo-keep-awake';
 
 import { useAudioRecorder, RecordingPresets, useAudioRecorderState, requestRecordingPermissionsAsync, setAudioModeAsync } from 'expo-audio';
 import * as Speech from 'expo-speech';
@@ -122,7 +123,16 @@ export default function AvatarScreen() {
         p.pause();
       }
     });
+  }, [avatarState, players]);
 
+  useEffect(() => {
+    activateKeepAwakeAsync().catch(() => {});
+    return () => {
+      deactivateKeepAwakeAsync().catch(() => {});
+    };
+  }, []);
+
+  useEffect(() => {
     // 2. Realistic Zoom (Attentive leaning-in)
     const targetScale = (avatarState === 'listening' || avatarState === 'thinking') ? 1.05 : 1.0;
     avatarScale.value = withTiming(targetScale, { duration: 800, easing: Easing.bezier(0.25, 0.1, 0.25, 1) });

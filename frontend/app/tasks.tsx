@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -9,15 +9,17 @@ import {
   ActivityIndicator,
   KeyboardAvoidingView,
   Platform,
-  Dimensions,
+  Modal,
+  Alert,
   ScrollView,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
+import { useRouter, useFocusEffect } from 'expo-router';
 import { auth } from '../firebaseConfig';
 import { getApiBaseUrl } from '../utils/api';
+import { fromISOToIST, toISTISOString } from '../utils/timezone';
 
 type Task = {
   _id: string;
@@ -25,6 +27,27 @@ type Task = {
   description: string;
   status: 'pending' | 'completed';
   priority?: 'high' | 'medium' | 'low';
+  date?: string;
+  event_datetime?: string;
+  time?: string;
+};
+
+type Birthday = {
+  _id: string;
+  name: string;
+  date: string;
+  monthDay: string;
+  year?: number;
+  relation: string;
+  color: string;
+};
+
+type Event = {
+  _id: string;
+  title: string;
+  date: string;
+  time?: string;
+  color: string;
 };
 
 type PriorityOption = {
@@ -34,11 +57,24 @@ type PriorityOption = {
   icon: string;
 };
 
-const priorityOptions: PriorityOption[] = [
-  { value: 'high', label: 'High', color: '#FF3B30', icon: '🔴' },
-  { value: 'medium', label: 'Medium', color: '#FF9500', icon: '🟠' },
-  { value: 'low', label: 'Low', color: '#34C759', icon: '🟢' },
-];
+  const priorityOptions: PriorityOption[] = [
+    { value: 'high', label: 'High', color: '#FF3B30', icon: '🔴' },
+    { value: 'medium', label: 'Medium', color: '#FF9500', icon: '🟠' },
+    { value: 'low', label: 'Low', color: '#34C759', icon: '🟢' },
+  ];
+
+  const menuItems = [
+    { type: 'event' as const, label: 'Event', icon: 'calendar', color: '#FF9500' },
+    { type: 'task' as const, label: 'Task', icon: 'checkbox', color: '#00E0C6' },
+    { type: 'birthday' as const, label: 'Birthday', icon: 'gift', color: '#FF6B6B' },
+  ];
+
+  const timeSlots = [
+    '12:00 AM', '1:00 AM', '2:00 AM', '3:00 AM', '4:00 AM', '5:00 AM',
+    '6:00 AM', '7:00 AM', '8:00 AM', '9:00 AM', '10:00 AM', '11:00 AM',
+    '12:00 PM', '1:00 PM', '2:00 PM', '3:00 PM', '4:00 PM', '5:00 PM',
+    '6:00 PM', '7:00 PM', '8:00 PM', '9:00 PM', '10:00 PM', '11:00 PM',
+  ];
 
 export default function TasksScreen() {
   const router = useRouter();
@@ -48,160 +84,127 @@ export default function TasksScreen() {
   const rawName = userEmail.split('@')[0] || 'User';
   const userName = rawName.charAt(0).toUpperCase() + rawName.slice(1);
 
-  // Calendar state
   const [currentDate, setCurrentDate] = useState(new Date());
   const [selectedDate, setSelectedDate] = useState(new Date());
   const [tasksByDate, setTasksByDate] = useState<Record<string, Task[]>>({});
   const [loadingTasks, setLoadingTasks] = useState(false);
+  const [birthdays, setBirthdays] = useState<Birthday[]>([]);
+  const [events, setEvents] = useState<Event[]>([]);
   
-  // Task input state
   const [newTaskTitle, setNewTaskTitle] = useState('');
-  
-  // Birthday/anniversary data (mock data for now)
-  const [birthdays, setBirthdays] = useState<Array<{
-    id: string;
-    name: string;
-    date: string;
-    year?: number;
-    relation: string;
-    color?: string;
-  }>>([]);
+  const [showTaskModal, setShowTaskModal] = useState(false);
+  const [editingTask, setEditingTask] = useState<Task | null>(null);
+  const [taskPriority, setTaskPriority] = useState<Task['priority']>('medium');
+  const [taskDescription, setTaskDescription] = useState('');
+  const [showAddMenu, setShowAddMenu] = useState(false);
+  const [taskTime, setTaskTime] = useState('');
+  const [showTimePicker, setShowTimePicker] = useState(false);
 
-  // Events data
-  const [events, setEvents] = useState<Array<{
-    id: string;
-    title: string;
-    date: string;
-    time?: string;
-    color?: string;
-  }>>([]);
+   const getISTDateKey = (isoString?: string): string => {
+     if (!isoString) return '';
+     const istDate = fromISOToIST(isoString);
+     const year = istDate.getFullYear();
+     const month = String(istDate.getMonth() + 1).padStart(2, '0');
+     const day = String(istDate.getDate()).padStart(2, '0');
+     return `${year}-${month}-${day}`;
+   };
 
-  // Combined items for the day
-  type CalendarItem = {
-    id: string;
-    type: 'task' | 'birthday' | 'event';
-    title: string;
-    subtitle?: string;
-    status?: 'pending' | 'completed';
-    color: string;
-    icon: string;
-    priority?: 'high' | 'medium' | 'low';
+  const getDateKeyFromDate = (date: Date): string => {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
   };
 
-  const getItemsForDate = (): CalendarItem[] => {
-    const dateString = selectedDate.toISOString().split('T')[0];
-    const monthDay = dateString.slice(5);
-    const items: CalendarItem[] = [];
-
-    // Add birthdays
-    const dayBirthdays = birthdays.filter(b => b.date === monthDay);
-    dayBirthdays.forEach(b => {
-      items.push({
-        id: `bday-${b.id}`,
-        type: 'birthday',
-        title: b.name,
-        subtitle: b.relation,
-        color: b.color || '#FF6B6B',
-        icon: '🎂'
-      });
-    });
-
-    // Add events
-    const dayEvents = events.filter(e => e.date === dateString);
-    dayEvents.forEach(e => {
-      items.push({
-        id: `event-${e.id}`,
-        type: 'event',
-        title: e.title,
-        subtitle: e.time,
-        color: e.color || '#FF9500',
-        icon: '📅'
-      });
-    });
-
-    // Add tasks
-    const dayTasks = tasksByDate[dateString] || [];
-    dayTasks.forEach(t => {
-      items.push({
-        id: `task-${t._id}`,
-        type: 'task',
-        title: t.title,
-        status: t.status,
-        color: t.status === 'completed' ? '#34C759' : (t.priority === 'high' ? '#FF3B30' : t.priority === 'medium' ? '#FF9500' : '#00E0C6'),
-        icon: t.status === 'completed' ? '✅' : '🔥',
-        priority: t.priority
-      });
-    });
-
-    // Sort: birthdays first, then events, then tasks by priority
-    const priorityOrder = { high: 0, medium: 1, low: 2 };
-    
-    items.sort((a, b) => {
-      // Birthday and events come first
-      if (a.type === 'birthday' && b.type !== 'birthday') return -1;
-      if (b.type === 'birthday' && a.type !== 'birthday') return 1;
-      if (a.type === 'event' && b.type === 'task') return -1;
-      if (b.type === 'event' && a.type === 'task') return 1;
-      
-      // For tasks, sort by priority
-      if (a.type === 'task' && b.type === 'task') {
-        const aPriority = a.priority ? priorityOrder[a.priority] : 3;
-        const bPriority = b.priority ? priorityOrder[b.priority] : 3;
-        return aPriority - bPriority;
-      }
-      
-      return 0;
-    });
-
-    return items;
-  };
-
-  useEffect(() => {
-    if (userId) {
-      loadTasksForDate(selectedDate);
-      loadBirthdays();
-    }
-  }, [userId, selectedDate]);
-
-  // Load tasks for a specific date
-  const loadTasksForDate = async (date: Date) => {
+  const loadData = async () => {
+    console.log('loadData called, userId:', userId);
     if (!userId) return;
-    
     setLoadingTasks(true);
     try {
-      const dateString = date.toISOString().split('T')[0]; // YYYY-MM-DD
       const { authFetch } = await import('../utils/api');
-      const res = await authFetch(`${getApiBaseUrl()}/api/tasks?userId=${userId}&date=${dateString}`);
       
-      if (res.ok) {
-        const data = await res.json();
-        // Ensure data is properly typed as Task[]
-        const typedData: Task[] = data.map((item: any) => ({
-          _id: item._id || '',
-          title: item.title || '',
-          description: item.description || '',
-          status: item.status === 'completed' ? 'completed' : 'pending'
-        }));
-        setTasksByDate(prev => ({
-          ...prev,
-          [dateString]: typedData
-        }));
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 15000);
+      
+      try {
+        const [tasksRes, birthdaysRes, eventsRes] = await Promise.all([
+          authFetch(`${getApiBaseUrl()}/api/tasks`, { signal: controller.signal }),
+          authFetch(`${getApiBaseUrl()}/api/birthdays`, { signal: controller.signal }),
+          authFetch(`${getApiBaseUrl()}/api/events`, { signal: controller.signal }),
+        ]);
+        
+        clearTimeout(timeoutId);
+        
+        console.log('Tasks response status:', tasksRes.status);
+        
+        if (tasksRes.ok) {
+          const tasks: Task[] = await tasksRes.json();
+          console.log('Tasks from API:', tasks);
+          const grouped: Record<string, Task[]> = {};
+          tasks.forEach(task => {
+            const dateStr = task.event_datetime || task.date;
+            const dateKey = getISTDateKey(dateStr);
+            console.log(`Task ${task.title}: dateStr=${dateStr}, dateKey=${dateKey}`);
+            if (!grouped[dateKey]) grouped[dateKey] = [];
+            grouped[dateKey].push(task);
+          });
+          Object.keys(grouped).forEach(key => {
+            grouped[key].sort((a, b) => {
+              const priorityOrder = { high: 0, medium: 1, low: 2 };
+              const aOrder = a.priority ? priorityOrder[a.priority] : 3;
+              const bOrder = b.priority ? priorityOrder[b.priority] : 3;
+              return aOrder - bOrder;
+            });
+          });
+          console.log('Tasks loaded:', tasks);
+          console.log('Grouped tasks:', grouped);
+          setTasksByDate(grouped);
+        } else {
+          console.log('Tasks fetch failed:', tasksRes.status, await tasksRes.text());
+        }
+        
+        if (birthdaysRes.ok) {
+          const bdays: Birthday[] = await birthdaysRes.json();
+          setBirthdays(bdays);
+        }
+        
+        if (eventsRes.ok) {
+          const evts: Event[] = await eventsRes.json();
+          setEvents(evts);
+        }
+      } catch (fetchError: any) {
+        clearTimeout(timeoutId);
+        console.log('Fetch error in loadData:', fetchError);
+>>>>>>> Stashed changes
       }
+
+      const items = Array.isArray(data) ? data : [];
+      const typedData: Task[] = items.map((item: any) => ({
+        _id: item._id || '',
+        title: item.title || '',
+        description: item.description || '',
+        status: item.status === 'completed' ? 'completed' : 'pending'
+      }));
+      setTasksByDate(prev => ({
+        ...prev,
+        [dateString]: typedData
+      }));
     } catch (error) {
-      console.log('Error fetching tasks for date', error);
+      console.log('Error loading data', error);
     } finally {
       setLoadingTasks(false);
     }
   };
 
-  // Load birthdays (mock implementation)
-  const loadBirthdays = async () => {
-    setBirthdays([]);
-    setEvents([]);
-    setTasksByDate({});
-  };
+   useFocusEffect(
+     useCallback(() => {
+       console.log('Tasks screen focused, userId:', userId);
+       if (userId) {
+         loadData();
+       }
+     }, [userId, selectedDate])
+   );
 
-  // Handle date navigation
   const goToPreviousMonth = () => {
     setCurrentDate(prev => {
       const newDate = new Date(prev);
@@ -222,177 +225,293 @@ export default function TasksScreen() {
     const today = new Date();
     setCurrentDate(today);
     setSelectedDate(today);
-    loadTasksForDate(today);
   };
 
-  // Handle date selection
   const handleDateSelect = (date: Date) => {
     setSelectedDate(date);
-    loadTasksForDate(date);
   };
 
-  // Check if date is today
   const isToday = (date: Date) => {
     const today = new Date();
     return date.toDateString() === today.toDateString();
   };
 
-  // Check if date is selected
   const isSelected = (date: Date) => {
     return selectedDate.toDateString() === date.toDateString();
   };
 
-  // Check if date has tasks
   const hasTasks = (date: Date) => {
-    const dateString = date.toISOString().split('T')[0];
+    const dateString = getDateKeyFromDate(date);
     return tasksByDate[dateString] && tasksByDate[dateString].length > 0;
   };
 
-  // Get tasks for selected date
-  const getSelectedDateTasks = () => {
-    const dateString = selectedDate.toISOString().split('T')[0];
-    return tasksByDate[dateString] || [];
-  };
-
-  // Check if date has birthday
   const getBirthdaysForDate = (date: Date) => {
     const month = String(date.getMonth() + 1).padStart(2, '0');
     const day = String(date.getDate()).padStart(2, '0');
     const dateKey = `${month}-${day}`;
-    
-    return birthdays.filter(birthday => birthday.date === dateKey);
+    return birthdays.filter(b => b.monthDay === dateKey);
   };
 
-  // Handle adding task
-  const handleAddTask = async () => {
-    if (!newTaskTitle.trim() || !userId) return;
-    
-    try {
-      const dateString = selectedDate.toISOString().split('T')[0];
-      const { authFetch } = await import('../utils/api');
-      const res = await authFetch(`${getApiBaseUrl()}/api/tasks`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          userId, 
-          title: newTaskTitle.trim(),
-          date: dateString
-        }),
-      });
-      
-      if (res.ok) {
-        const newTask = await res.json();
-        // Update tasks for selected date
-        setTasksByDate(prev => ({
-          ...prev,
-          [dateString]: [newTask as Task, ...(prev[dateString] || [])]
-        }));
-        setNewTaskTitle('');
-      }
-    } catch (error) {
-      console.log('Error adding task', error);
-    }
+  const getEventsForDate = (date: Date) => {
+    const dateKey = getDateKeyFromDate(date);
+    return events.filter(e => e.date && getISTDateKey(e.date) === dateKey);
   };
 
-  // Handle toggling task status
-  const toggleTaskStatus = async (task: Task) => {
-    const newStatus = task.status === 'completed' ? 'pending' : 'completed';
-    const dateString = new Date().toISOString().split('T')[0]; // Simplified - in real app we'd store date with task
-    
-    // Optimistic update
-    setTasksByDate(prev => {
-      const dateTasks = prev[dateString] || [];
-      const updatedTasks = dateTasks.map(t => 
-        t._id === task._id ? { ...t, status: newStatus as Task['status'] } : t
-      );
-      return {
-        ...prev,
-        [dateString]: updatedTasks
-      };
-    });
-    
-    try {
-      const { authFetch } = await import('../utils/api');
-      await authFetch(`${getApiBaseUrl()}/api/tasks/${task._id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: newStatus }),
-      });
-    } catch (error) {
-      console.log('Error updating task', error);
-      // Revert on error
-      setTasksByDate(prev => {
-        const dateTasks = prev[dateString] || [];
-        const updatedTasks = dateTasks.map(t => 
-          t._id === task._id ? { ...t, status: task.status } : t
-        );
-        return {
-          ...prev,
-          [dateString]: updatedTasks
-        };
-      });
-    }
-  };
-
-  // Handle deleting task
-  const deleteTask = async (taskId: string) => {
-    // We would need to know which date this task belongs to
-    // For simplicity, we'll refetch all tasks for the selected date after deletion
-    try {
-      const { authFetch } = await import('../utils/api');
-      await authFetch(`${getApiBaseUrl()}/api/tasks/${taskId}`, {
-        method: 'DELETE',
-      });
-      
-      // Refetch tasks for selected date
-      loadTasksForDate(selectedDate);
-    } catch (error) {
-      console.log('Error deleting task', error);
-    }
-  };
-
-  // Get days in month
   const getDaysInMonth = (year: number, month: number) => {
     return new Date(year, month + 1, 0).getDate();
   };
 
-  // Get first day of month (0-6, where 0 is Sunday)
   const getFirstDayOfMonth = (year: number, month: number) => {
     return new Date(year, month, 1).getDay();
   };
 
-  // Format date for display
-  const formatDate = (date: Date) => {
-    return date.toLocaleDateString(undefined, { 
-      year: 'numeric', 
-      month: 'long', 
-      day: 'numeric' 
-    });
-  };
-
-  // Get month name
   const getMonthName = (date: Date) => {
     return date.toLocaleDateString(undefined, { month: 'long' });
   };
 
-  // Check if date has birthday today
-  const hasBirthdayToday = (date: Date) => {
-    const today = new Date();
-    const month = String(today.getMonth() + 1).padStart(2, '0');
-    const day = String(today.getDate()).padStart(2, '0');
-    const todayKey = `${month}-${day}`;
-    
-    return birthdays.some(birthday => birthday.date === todayKey);
+  const getSelectedDateTasks = () => {
+    const dateString = getDateKeyFromDate(selectedDate);
+    console.log(`Selected date: ${selectedDate.toISOString()}, key: ${dateString}`);
+    return tasksByDate[dateString] || [];
   };
 
-  // Get today's birthdays
-  const getTodaysBirthdays = () => {
-    const today = new Date();
-    const month = String(today.getMonth() + 1).padStart(2, '0');
-    const day = String(today.getDate()).padStart(2, '0');
-    const todayKey = `${month}-${day}`;
+   const handleAddTask = async () => {
+     if (!newTaskTitle.trim() || !userId) return;
+     
+     const dateStr = getDateKeyFromDate(selectedDate);
+     const event_datetime = taskTime ? toISTISOString(dateStr, taskTime) : toISTISOString(dateStr);
+     
+     // Optimistically add task to local state
+     const newTask = {
+       _id: Date.now().toString(), // Temporary ID
+       title: newTaskTitle.trim(),
+       description: taskDescription,
+       priority: taskPriority,
+       event_datetime,
+       time: taskTime,
+       type: 'task',
+       allDay: !taskTime,
+       reminder_minutes: 30,
+       status: 'pending'
+     };
+     
+     // Update local state immediately
+     setTasksByDate(prev => {
+       const dateTasks = prev[dateStr] || [];
+       return { ...prev, [dateStr]: [...dateTasks, newTask] };
+     });
+     
+     // Close modal immediately
+     setNewTaskTitle('');
+     setTaskDescription('');
+     setTaskPriority('medium');
+     setTaskTime('');
+     setShowTaskModal(false);
+     
+     // Send request to backend
+     try {
+       const { authFetch } = await import('../utils/api');
+       const res = await authFetch(`${getApiBaseUrl()}/api/tasks`, {
+         method: 'POST',
+         headers: { 'Content-Type': 'application/json' },
+         body: JSON.stringify({ 
+           userId, 
+           title: newTaskTitle.trim(),
+           description: taskDescription,
+           priority: taskPriority,
+           event_datetime,
+           time: taskTime,
+           type: 'task',
+           allDay: !taskTime,
+           reminder_minutes: 30,
+           status: 'pending'
+         }),
+       });
+       
+       if (!res.ok) {
+         // If server error, rollback the optimistic update
+         console.log('Error adding task', await res.text());
+         // Note: In a production app, we'd want to properly rollback here
+         // For simplicity, we'll just show an error and let user retry
+         Alert.alert('Error', 'Failed to save task. Please try again.');
+         loadData(); // Reload to get correct state
+       }
+     } catch (error) {
+       console.log('Error adding task', error);
+       // Rollback optimistic update on error
+       loadData(); // Reload to get correct state
+       Alert.alert('Error', 'Failed to save task. Please check your connection.');
+     }
+   };
+
+   const handleUpdateTask = async () => {
+     if (!editingTask || !newTaskTitle.trim()) return;
+     
+     const dateStr = getDateKeyFromDate(selectedDate);
+     
+     // Optimistically update task in local state
+     const updatedTask = {
+       ...editingTask,
+       title: newTaskTitle.trim(),
+       description: taskDescription,
+       priority: taskPriority
+     };
+     
+     // Update local state immediately
+     setTasksByDate(prev => {
+       const dateTasks = prev[dateStr] || [];
+       const updatedTasks = dateTasks.map(t => 
+         t._id === editingTask._id ? updatedTask : t
+       );
+       return { ...prev, [dateStr]: updatedTasks };
+     });
+     
+     // Close modal immediately
+     setEditingTask(null);
+     setNewTaskTitle('');
+     setTaskDescription('');
+     setTaskPriority('medium');
+     setShowTaskModal(false);
+     
+     // Send request to backend
+     try {
+       const { authFetch } = await import('../utils/api');
+       const res = await authFetch(`${getApiBaseUrl()}/api/tasks/${editingTask._id}`, {
+         method: 'PUT',
+         headers: { 'Content-Type': 'application/json' },
+         body: JSON.stringify({ 
+           title: newTaskTitle.trim(),
+           description: taskDescription,
+           priority: taskPriority,
+         }),
+       });
+       
+       if (!res.ok) {
+         // If server error, rollback the optimistic update
+         console.log('Error updating task', await res.text());
+         // Note: In a production app, we'd want to properly rollback here
+         // For simplicity, we'll just show an error and let user retry
+         Alert.alert('Error', 'Failed to update task. Please try again.');
+         loadData(); // Reload to get correct state
+       }
+     } catch (error) {
+       console.log('Error updating task', error);
+       // Rollback optimistic update on error
+       loadData(); // Reload to get correct state
+       Alert.alert('Error', 'Failed to update task. Please check your connection.');
+     }
+   };
+
+   const handleDeleteTask = async (task: Task) => {
+     Alert.alert(
+       'Delete Task',
+       'Are you sure you want to delete this task?',
+       [
+         { text: 'Cancel', style: 'cancel' },
+         { 
+           text: 'Delete', 
+           style: 'destructive',
+           onPress: async () => {
+             const dateStr = getDateKeyFromDate(selectedDate);
+             
+             // Optimistically remove task from local state
+             setTasksByDate(prev => {
+               const dateTasks = prev[dateStr] || [];
+               const filteredTasks = dateTasks.filter(t => t._id !== task._id);
+               return { ...prev, [dateStr]: filteredTasks };
+             });
+             
+             try {
+               const { authFetch } = await import('../utils/api');
+               await authFetch(`${getApiBaseUrl()}/api/tasks/${task._id}`, {
+                 method: 'DELETE',
+               });
+             } catch (error) {
+               console.log('Error deleting task', error);
+               // Rollback optimistic update on error
+               loadData(); // Reload to get correct state
+               Alert.alert('Error', 'Failed to delete task. Please try again.');
+             }
+           }
+         },
+       ]
+     );
+   };
+
+   const toggleTaskStatus = async (task: Task) => {
+     const newStatus: 'pending' | 'completed' = task.status === 'completed' ? 'pending' : 'completed';
+     const dateString = getDateKeyFromDate(selectedDate);
+     
+     // Optimistically update task status in local state
+     setTasksByDate(prev => {
+       const dateTasks = prev[dateString] || [];
+       const updatedTasks = dateTasks.map(t => 
+         t._id === task._id ? { ...t, status: newStatus } : t
+       );
+       return { ...prev, [dateString]: updatedTasks };
+     });
+     
+     try {
+       const { authFetch } = await import('../utils/api');
+       await authFetch(`${getApiBaseUrl()}/api/tasks/${task._id}`, {
+         method: 'PUT',
+         headers: { 'Content-Type': 'application/json' },
+         body: JSON.stringify({ status: newStatus }),
+       });
+     } catch (error) {
+       console.log('Error updating task', error);
+       // Rollback optimistic update on error
+       loadData(); // Reload to get correct state
+       Alert.alert('Error', 'Failed to update task status. Please try again.');
+     }
+   };
+
+  const openEditModal = (task: Task) => {
+    setEditingTask(task);
+    setNewTaskTitle(task.title);
+    setTaskDescription(task.description || '');
+    setTaskPriority(task.priority || 'medium');
+    setTaskTime(task.time || '');
+    setShowTaskModal(true);
+  };
+
+  const openAddModal = () => {
+    setEditingTask(null);
+    setNewTaskTitle('');
+    setTaskDescription('');
+    setTaskPriority('medium');
+    setTaskTime('');
+    setShowTaskModal(true);
+  };
+
+  const handleOpenMenu = () => {
+    setShowAddMenu(true);
+  };
+
+  const handleCloseMenu = () => {
+    setShowAddMenu(false);
+  };
+
+  const handleSelectType = (type: 'event' | 'task' | 'birthday') => {
+    setShowAddMenu(false);
+    const dateString = selectedDate.toISOString().split('T')[0];
     
-    return birthdays.filter(birthday => birthday.date === todayKey);
+    if (type === 'task') {
+      router.push(`/add-task?date=${dateString}`);
+    } else if (type === 'event') {
+      router.push(`/add-event?date=${dateString}`);
+    } else if (type === 'birthday') {
+      router.push(`/add-birthday?date=${dateString}`);
+    }
+  };
+
+  const getPriorityColor = (priority?: string) => {
+    switch (priority) {
+      case 'high': return '#FF3B30';
+      case 'medium': return '#FF9500';
+      case 'low': return '#34C759';
+      default: return '#00E0C6';
+    }
   };
 
   return (
@@ -414,77 +533,53 @@ export default function TasksScreen() {
       </View>
 
       <FlatList
-        data={getItemsForDate()}
-        keyExtractor={item => item.id}
+        data={getSelectedDateTasks()}
+        keyExtractor={item => item._id}
         renderItem={({ item }) => {
           const isCompleted = item.status === 'completed';
           const priorityInfo = priorityOptions.find(p => p.value === item.priority);
-          
-          const handlePress = () => {
-            if (item.type === 'birthday') {
-              const birthday = birthdays.find(b => `bday-${b.id}` === item.id);
-              if (birthday) {
-                router.push(`/birthday-detail?id=${birthday.id}&name=${encodeURIComponent(birthday.name)}&date=${birthday.date}&relation=${encodeURIComponent(birthday.relation || '')}&color=${birthday.color || '#FF6B6B'}`);
-              }
-            }
-          };
-          
-          const CardComponent = item.type !== 'task' ? TouchableOpacity : View;
+          const priorityColor = getPriorityColor(item.priority);
           
           return (
-            <CardComponent 
-              style={[styles.itemCard, { borderLeftColor: item.color }]}
-              onPress={item.type !== 'task' ? handlePress : undefined}
-            >
+            <View style={[styles.itemCard, { borderLeftColor: priorityColor }]}>
               <View style={styles.itemLeft}>
-                <Text style={styles.itemIcon}>{item.icon}</Text>
+                <TouchableOpacity 
+                  style={styles.checkButton}
+                  onPress={() => toggleTaskStatus(item)}
+                >
+                  <Ionicons 
+                    name={isCompleted ? "checkmark-circle" : "ellipse-outline"} 
+                    size={26} 
+                    color={isCompleted ? "#34C759" : "#ccc"} 
+                  />
+                </TouchableOpacity>
                 <View style={styles.itemInfo}>
-                  <View style={styles.titleRow}>
-                    <Text style={[styles.itemTitle, isCompleted && styles.itemTitleCompleted]} numberOfLines={1}>
-                      {item.title}
-                    </Text>
-                    {item.type === 'task' && item.priority && (
-                      <View style={[styles.priorityBadge, { backgroundColor: priorityInfo?.color + '20' }]}>
-                        <Text style={[styles.priorityText, { color: priorityInfo?.color }]}>
-                          {priorityInfo?.icon} {priorityInfo?.label}
-                        </Text>
-                      </View>
-                    )}
-                  </View>
-                  {item.subtitle && (
-                    <Text style={styles.itemSubtitle}>{item.subtitle}</Text>
-                  )}
+                  <Text style={[styles.itemTitle, isCompleted && styles.itemTitleCompleted]} numberOfLines={1}>
+                    {item.title}
+                  </Text>
+                  {item.description ? (
+                    <Text style={styles.itemSubtitle} numberOfLines={1}>{item.description}</Text>
+                  ) : null}
                 </View>
               </View>
               <View style={styles.itemRight}>
-                {item.type === 'task' ? (
-                  <TouchableOpacity 
-                    style={styles.checkButton}
-                    onPress={() => {
-                      const task = getSelectedDateTasks().find(t => t._id === item.id.replace('task-', ''));
-                      if (task) toggleTaskStatus(task);
-                    }}
-                  >
-                    <Ionicons 
-                      name={isCompleted ? "checkmark-circle" : "ellipse-outline"} 
-                      size={26} 
-                      color={isCompleted ? "#34C759" : "#ccc"} 
-                    />
-                  </TouchableOpacity>
-                ) : (
-                  <View style={[styles.typeBadge, { backgroundColor: item.color + '20' }]}>
-                    <Text style={[styles.typeBadgeText, { color: item.color }]}>
-                      {item.type === 'birthday' ? 'Birthday' : 'Event'}
-                    </Text>
+                {item.priority && (
+                  <View style={[styles.priorityDot, { backgroundColor: priorityColor }]}>
+                    <Text style={styles.priorityDotText}>{priorityInfo?.icon}</Text>
                   </View>
                 )}
+                <TouchableOpacity onPress={() => openEditModal(item)} style={styles.actionBtn}>
+                  <Ionicons name="pencil" size={18} color="#666" />
+                </TouchableOpacity>
+                <TouchableOpacity onPress={() => handleDeleteTask(item)} style={styles.actionBtn}>
+                  <Ionicons name="trash-outline" size={18} color="#FF3B30" />
+                </TouchableOpacity>
               </View>
-            </CardComponent>
+            </View>
           );
         }}
         ListHeaderComponent={
           <>
-            {/* Date Navigation */}
             <View style={styles.dateNavContainer}>
               <TouchableOpacity onPress={goToPreviousMonth} style={styles.navButton}>
                 <Ionicons name="chevron-back" size={28} color="#333" />
@@ -498,27 +593,23 @@ export default function TasksScreen() {
               </TouchableOpacity>
             </View>
 
-            {/* Calendar Grid */}
             <View style={styles.calendarContainer}>
               <View style={styles.weekdayRow}>
-                <Text style={styles.weekdayText}>Sun</Text>
-                <Text style={styles.weekdayText}>Mon</Text>
-                <Text style={styles.weekdayText}>Tue</Text>
-                <Text style={styles.weekdayText}>Wed</Text>
-                <Text style={styles.weekdayText}>Thu</Text>
-                <Text style={styles.weekdayText}>Fri</Text>
-                <Text style={styles.weekdayText}>Sat</Text>
+                {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(day => (
+                  <Text key={day} style={styles.weekdayText}>{day}</Text>
+                ))}
               </View>
               <View style={styles.daysContainer}>
                 {[...Array(getFirstDayOfMonth(currentDate.getFullYear(), currentDate.getMonth()))].map((_, index) => (
-                  <View key={index} style={styles.dayCell} />
+                  <View key={`empty-${index}`} style={styles.dayCell} />
                 ))}
                 {[...Array(getDaysInMonth(currentDate.getFullYear(), currentDate.getMonth()))].map((_, dayIndex) => {
                   const date = new Date(currentDate.getFullYear(), currentDate.getMonth(), dayIndex + 1);
                   const isTodayDate = isToday(date);
                   const isSelectedDate = isSelected(date);
-                  const hasTasksOnDate = hasTasks(date);
+                  const tasksOnDate = hasTasks(date);
                   const birthdaysOnDate = getBirthdaysForDate(date);
+                  const eventsOnDate = getEventsForDate(date);
                   
                   return (
                     <TouchableOpacity
@@ -527,37 +618,40 @@ export default function TasksScreen() {
                         styles.dayCell,
                         isSelectedDate && styles.selectedDay,
                         isTodayDate && styles.todayDay,
-                        hasTasksOnDate && styles.hasTaskDay,
+                        tasksOnDate && styles.hasTaskDay,
                         birthdaysOnDate.length > 0 && styles.hasBirthdayDay
                       ]}
                       onPress={() => handleDateSelect(date)}
                     >
-                      <Text style={styles.dayNumber}>{dayIndex + 1}</Text>
-                      {hasTasksOnDate && (
-                        <View style={styles.taskIndicator}>
-                          <Text style={styles.taskIndicatorText}>●</Text>
-                        </View>
-                      )}
-                      {birthdaysOnDate.length > 0 && (
-                        <View style={styles.birthdayIndicator}>
-                          <Text style={styles.birthdayIndicatorText}>🎂</Text>
-                        </View>
-                      )}
+                      <Text style={[styles.dayNumber, isSelectedDate && styles.selectedDayNumber]}>
+                        {dayIndex + 1}
+                      </Text>
+                      <View style={styles.indicatorsRow}>
+                        {tasksOnDate && (
+                          <View style={styles.taskIndicator} />
+                        )}
+                        {birthdaysOnDate.map((bday, idx) => (
+                          <View 
+                            key={idx} 
+                            style={[styles.birthdayDot, { backgroundColor: bday.color }]} 
+                          />
+                        ))}
+                        {eventsOnDate.length > 0 && (
+                          <View style={[styles.eventDot, { backgroundColor: eventsOnDate[0].color }]} />
+                        )}
+                      </View>
                     </TouchableOpacity>
                   );
                 })}
               </View>
             </View>
 
-            {/* Selected Date Header */}
             <View style={styles.selectedDateContainer}>
               <View style={styles.selectedDateLeft}>
                 <Text style={styles.dayNameText}>
                   {selectedDate.toLocaleDateString('en-US', { weekday: 'long' })}
                 </Text>
-                <Text style={styles.selectedDateText}>
-                  {selectedDate.getDate()}
-                </Text>
+                <Text style={styles.selectedDateText}>{selectedDate.getDate()}</Text>
               </View>
               <View style={styles.selectedDateActions}>
                 <TouchableOpacity style={styles.actionButton} onPress={() => router.push('/add-journal')}>
@@ -569,14 +663,13 @@ export default function TasksScreen() {
               </View>
             </View>
 
-            {/* Birthdays on Selected Date */}
             {getBirthdaysForDate(selectedDate).length > 0 && (
               <View style={styles.dateBirthdaysSection}>
                 {getBirthdaysForDate(selectedDate).map((birthday) => (
                   <TouchableOpacity 
-                    key={birthday.id} 
-                    style={[styles.dateBirthdayCard, { borderLeftColor: birthday.color || '#FF6B6B' }]}
-                    onPress={() => router.push(`/birthday-detail?id=${birthday.id}&name=${encodeURIComponent(birthday.name)}&date=${birthday.date}&relation=${encodeURIComponent(birthday.relation || '')}&color=${birthday.color || '#FF6B6B'}`)}
+                    key={birthday._id} 
+                    style={[styles.dateBirthdayCard, { borderLeftColor: birthday.color }]}
+                    onPress={() => router.push(`/birthday-detail?id=${birthday._id}&name=${encodeURIComponent(birthday.name)}&date=${birthday.date}&relation=${encodeURIComponent(birthday.relation || '')}&color=${birthday.color}`)}
                   >
                     <Text style={styles.dateBirthdayIcon}>🎂</Text>
                     <View style={styles.dateBirthdayInfo}>
@@ -585,6 +678,23 @@ export default function TasksScreen() {
                     </View>
                     <Ionicons name="chevron-forward" size={20} color="#999" />
                   </TouchableOpacity>
+                ))}
+              </View>
+            )}
+
+            {getEventsForDate(selectedDate).length > 0 && (
+              <View style={styles.dateBirthdaysSection}>
+                {getEventsForDate(selectedDate).map((event) => (
+                  <View 
+                    key={event._id} 
+                    style={[styles.dateBirthdayCard, { borderLeftColor: event.color }]}
+                  >
+                    <Text style={styles.dateBirthdayIcon}>📅</Text>
+                    <View style={styles.dateBirthdayInfo}>
+                      <Text style={styles.dateBirthdayName}>{event.title}</Text>
+                      {event.time && <Text style={styles.dateBirthdayRelation}>{event.time}</Text>}
+                    </View>
+                  </View>
                 ))}
               </View>
             )}
@@ -601,7 +711,7 @@ export default function TasksScreen() {
         }
         ListFooterComponent={<View style={{ height: 100 }} />}
         ListEmptyComponent={
-          !loadingTasks ? (
+          !loadingTasks && getSelectedDateTasks().length === 0 ? (
             <View style={styles.emptyState}>
               <Text style={styles.emptyIcon}>🎉</Text>
               <Text style={styles.emptyTitle}>Nothing planned</Text>
@@ -613,16 +723,31 @@ export default function TasksScreen() {
         showsVerticalScrollIndicator={false}
       />
 
-      {/* Floating Add Button */}
       <TouchableOpacity 
         style={[styles.floatingAddButton, { bottom: Math.max(insets.bottom, 10) + 90 }]}
-        onPress={() => router.push('/add-task')}
+        onPress={handleOpenMenu}
       >
         <Ionicons name="add" size={32} color="#fff" />
       </TouchableOpacity>
 
+      {/* Add Menu Modal */}
+      <Modal visible={showAddMenu} transparent animationType="fade">
+        <TouchableOpacity style={styles.menuOverlay} onPress={handleCloseMenu}>
+          <View style={[styles.addMenu, { bottom: Math.max(insets.bottom, 30) + 160 }]}>
+            {menuItems.map((item, index) => (
+              <TouchableOpacity
+                key={item.type}
+                style={[styles.menuItem, { backgroundColor: item.color + '20' }]}
+                onPress={() => handleSelectType(item.type)}
+              >
+                <Ionicons name={item.icon as any} size={24} color={item.color} />
+                <Text style={[styles.menuItemText, { color: item.color }]}>{item.label}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </TouchableOpacity>
+      </Modal>
 
-      {/* Bottom Navigation */}
       <View style={[styles.bottomNav, { paddingBottom: Math.max(insets.bottom, 10) }]}>
         <TouchableOpacity style={styles.navItem} onPress={() => router.push('/home')}>
           <Ionicons name="home-outline" size={26} color="#888" />
@@ -645,441 +770,280 @@ export default function TasksScreen() {
           <Text style={styles.navText}>Docs</Text>
         </TouchableOpacity>
       </View>
+
+      <Modal visible={showTaskModal} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalContent, { paddingBottom: insets.bottom + 20 }]}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>{editingTask ? 'Edit Task' : 'Add Task'}</Text>
+              <TouchableOpacity onPress={() => setShowTaskModal(false)}>
+                <Ionicons name="close" size={24} color="#333" />
+              </TouchableOpacity>
+            </View>
+
+            {/* Date Display */}
+            <View style={styles.dateDisplay}>
+              <Ionicons name="calendar" size={20} color="#00E0C6" />
+              <Text style={styles.dateDisplayText}>
+                Adding for: {selectedDate.toLocaleDateString('en-US', { 
+                  weekday: 'long', 
+                  month: 'long', 
+                  day: 'numeric',
+                  year: 'numeric'
+                })}
+              </Text>
+            </View>
+
+            <TextInput
+              style={styles.modalInput}
+              placeholder="Task title"
+              value={newTaskTitle}
+              onChangeText={setNewTaskTitle}
+              placeholderTextColor="#999"
+            />
+
+            <TextInput
+              style={[styles.modalInput, styles.modalTextArea]}
+              placeholder="Description (optional)"
+              value={taskDescription}
+              onChangeText={setTaskDescription}
+              placeholderTextColor="#999"
+              multiline
+              numberOfLines={3}
+            />
+
+            <Text style={styles.modalLabel}>Priority</Text>
+            <View style={styles.priorityRow}>
+              {priorityOptions.map((p) => (
+                <TouchableOpacity
+                  key={p.value}
+                  style={[
+                    styles.priorityOption,
+                    taskPriority === p.value && { 
+                      backgroundColor: p.color + '20',
+                      borderColor: p.color 
+                    }
+                  ]}
+                  onPress={() => setTaskPriority(p.value)}
+                >
+                  <Text>{p.icon}</Text>
+                  <Text style={[
+                    styles.priorityLabel,
+                    taskPriority === p.value && { color: p.color }
+                  ]}>{p.label}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            {/* Time Selection */}
+            <Text style={styles.modalLabel}>Time (optional)</Text>
+            <TouchableOpacity 
+              style={styles.timeSelector}
+              onPress={() => setShowTimePicker(true)}
+            >
+              <Ionicons name="time" size={20} color="#666" />
+              <Text style={styles.timeSelectorText}>
+                {taskTime || 'Select time (optional)'}
+              </Text>
+              <Ionicons name="chevron-forward" size={20} color="#999" />
+            </TouchableOpacity>
+
+            <TouchableOpacity 
+              style={styles.saveButton}
+              onPress={editingTask ? handleUpdateTask : handleAddTask}
+            >
+              <Text style={styles.saveButtonText}>{editingTask ? 'Update' : 'Add'} Task</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Time Picker Modal */}
+      <Modal visible={showTimePicker} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={[styles.timePickerModal, { paddingBottom: insets.bottom + 20 }]}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Select Time</Text>
+              <TouchableOpacity onPress={() => setShowTimePicker(false)}>
+                <Ionicons name="close" size={24} color="#333" />
+              </TouchableOpacity>
+            </View>
+            <ScrollView style={styles.timeList}>
+              {timeSlots.map((time) => (
+                <TouchableOpacity
+                  key={time}
+                  style={[
+                    styles.timeOption,
+                    taskTime === time && styles.timeOptionSelected
+                  ]}
+                  onPress={() => {
+                    setTaskTime(time);
+                    setShowTimePicker(false);
+                  }}
+                >
+                  <Text style={[
+                    styles.timeOptionText,
+                    taskTime === time && styles.timeOptionTextSelected
+                  ]}>
+                    {time}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
     </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#FAFCFC',
-  },
-  scrollContent: {
-    flex: 1,
-  },
+  container: { flex: 1, backgroundColor: '#FAFCFC' },
   header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 20,
-    paddingVertical: 15,
-    backgroundColor: '#fff',
-    borderBottomWidth: 1,
-    borderBottomColor: '#f0f0f0',
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: 20, paddingVertical: 15, backgroundColor: '#fff',
+    borderBottomWidth: 1, borderBottomColor: '#f0f0f0',
   },
-  backButton: {
-    padding: 5,
-  },
-  headerContent: {
-    flex: 1,
-  },
-  greetingTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: '#333',
-  },
-  greetingSubtitle: {
-    fontSize: 14,
-    color: '#666',
-  },
-  todayButton: {
-    padding: 8,
-  },
+  backButton: { padding: 5 },
+  headerContent: { flex: 1 },
+  greetingTitle: { fontSize: 20, fontWeight: 'bold', color: '#333' },
+  greetingSubtitle: { fontSize: 14, color: '#666' },
+  todayButton: { padding: 8 },
   dateNavContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 20,
-    paddingVertical: 12,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: 20, paddingVertical: 12,
   },
-  navButton: {
-    padding: 8,
-  },
-  monthYearDisplay: {
-    alignItems: 'center',
-  },
-  monthText: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: '#333',
-  },
-  yearText: {
-    fontSize: 16,
-    color: '#666',
-  },
+  navButton: { padding: 8 },
+  monthYearDisplay: { alignItems: 'center' },
+  monthText: { fontSize: 18, fontWeight: '600', color: '#333' },
+  yearText: { fontSize: 16, color: '#666' },
   calendarContainer: {
-    backgroundColor: '#fff',
-    borderRadius: 12,
-    padding: 16,
-    marginHorizontal: 20,
-    marginTop: 16,
+    backgroundColor: '#fff', borderRadius: 12, padding: 16, marginHorizontal: 20, marginTop: 16,
   },
-  weekdayRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    marginVertical: 8,
-  },
-  weekdayText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#666',
-  },
-  daysContainer: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-  },
+  weekdayRow: { flexDirection: 'row', justifyContent: 'space-around', marginVertical: 8 },
+  weekdayText: { fontSize: 14, fontWeight: '600', color: '#666' },
+  daysContainer: { flexDirection: 'row', flexWrap: 'wrap' },
   dayCell: {
-    width: '14.28%', // 100% / 7
-    aspectRatio: 1,
-    justifyContent: 'flex-start',
-    alignItems: 'flex-start',
-    padding: 4,
+    width: '14.28%', aspectRatio: 1, justifyContent: 'flex-start', alignItems: 'center', padding: 4,
   },
-  selectedDay: {
-    backgroundColor: '#E3F2FD',
-    borderRadius: 8,
-  },
-  todayDay: {
-    borderWidth: 2,
-    borderColor: '#00E0C6',
-    borderRadius: 8,
-  },
-  hasTaskDay: {
-    backgroundColor: '#FFF3E0',
-    borderRadius: 8,
-  },
-  hasBirthdayDay: {
-    backgroundColor: '#FCE4EC',
-    borderRadius: 8,
-  },
-  dayNumber: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#333',
-  },
-  taskIndicator: {
-    position: 'absolute',
-    bottom: 4,
-    right: 4,
-    backgroundColor: '#00E0C6',
-    width: 16,
-    height: 16,
-    borderRadius: 8,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  taskIndicatorText: {
-    color: 'white',
-    fontSize: 10,
-    fontWeight: 'bold',
-  },
-  birthdayIndicator: {
-    position: 'absolute',
-    bottom: 4,
-    left: 4,
-    backgroundColor: '#ff6b6b',
-    width: 16,
-    height: 16,
-    borderRadius: 8,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  birthdayIndicatorText: {
-    color: 'white',
-    fontSize: 10,
-    fontWeight: 'bold',
-  },
+  selectedDay: { backgroundColor: '#E3F2FD', borderRadius: 8 },
+  todayDay: { borderWidth: 2, borderColor: '#00E0C6', borderRadius: 8 },
+  hasTaskDay: { backgroundColor: '#FFF3E0', borderRadius: 8 },
+  hasBirthdayDay: { backgroundColor: '#FCE4EC', borderRadius: 8 },
+  dayNumber: { fontSize: 16, fontWeight: '600', color: '#333' },
+  selectedDayNumber: { color: '#00E0C6' },
+  indicatorsRow: { flexDirection: 'row', gap: 2, marginTop: 2 },
+  taskIndicator: { width: 6, height: 6, borderRadius: 3, backgroundColor: '#00E0C6' },
+  birthdayDot: { width: 6, height: 6, borderRadius: 3 },
+  eventDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: '#FF9500' },
   selectedDateContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 20,
-    paddingVertical: 16,
-    backgroundColor: '#fff',
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: 20, paddingVertical: 16, backgroundColor: '#fff',
   },
-  selectedDateLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  dayNameText: {
-    fontSize: 18,
-    color: '#666',
-    marginRight: 12,
-  },
-  selectedDateText: {
-    fontSize: 28,
-    fontWeight: 'bold',
-    color: '#333',
-  },
-  selectedDateActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  dateBirthdaysSection: {
-    paddingHorizontal: 20,
-    paddingBottom: 16,
-    backgroundColor: '#fff',
-  },
+  selectedDateLeft: { flexDirection: 'row', alignItems: 'center' },
+  dayNameText: { fontSize: 18, color: '#666', marginRight: 12 },
+  selectedDateText: { fontSize: 28, fontWeight: 'bold', color: '#333' },
+  selectedDateActions: { flexDirection: 'row', alignItems: 'center' },
+  actionButton: { padding: 8 },
+  dateBirthdaysSection: { paddingHorizontal: 20, paddingBottom: 16, backgroundColor: '#fff' },
   dateBirthdayCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#FFF9F9',
-    borderRadius: 12,
-    padding: 14,
-    borderLeftWidth: 4,
-    marginBottom: 8,
+    flexDirection: 'row', alignItems: 'center', backgroundColor: '#FFF9F9',
+    borderRadius: 12, padding: 14, borderLeftWidth: 4, marginBottom: 8,
   },
-  dateBirthdayIcon: {
-    fontSize: 28,
-    marginRight: 12,
-  },
-  dateBirthdayInfo: {
-    flex: 1,
-  },
-  dateBirthdayName: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#333',
-  },
-  dateBirthdayRelation: {
-    fontSize: 13,
-    color: '#666',
-    marginTop: 2,
-  },
-  actionButton: {
-    padding: 8,
-  },
-  tasksSection: {
-    paddingHorizontal: 20,
-    paddingVertical: 16,
-    backgroundColor: '#fff',
-    marginTop: 16,
-  },
-  sectionTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: '#333',
-    marginBottom: 12,
-  },
-  loadingContainer: {
-    alignItems: 'center',
-    padding: 16,
-  },
-  emptyTasksText: {
-    textAlign: 'center',
-    color: '#999',
-    fontSize: 16,
-    padding: 24,
-  },
-  taskListContent: {
-    padding: 12,
-  },
-  taskItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    padding: 12,
-    backgroundColor: '#f8f9fa',
-    borderRadius: 8,
-    marginBottom: 8,
-  },
-  checkbox: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    borderWidth: 2,
-    borderColor: '#ccc',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 12,
-  },
-  taskInfo: {
-    flex: 1,
-  },
-  taskTitle: {
-    fontSize: 16,
-    color: '#333',
-  },
-  taskTitleCompleted: {
-    textDecorationLine: 'line-through',
-    color: '#999',
-  },
-  deleteButton: {
-    padding: 6,
-  },
-  inputSection: {
-    paddingHorizontal: 20,
-    paddingVertical: 16,
-    backgroundColor: '#fff',
-    marginTop: 16,
-  },
-  taskInput: {
-    flex: 1,
-    height: 48,
-    backgroundColor: '#f5f5f5',
-    borderRadius: 24,
-    paddingHorizontal: 16,
-    fontSize: 16,
-    color: '#333',
-  },
-  floatingAddButton: {
-    position: 'absolute',
-    right: 20,
-    bottom: 100,
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    backgroundColor: '#00E0C6',
-    justifyContent: 'center',
-    alignItems: 'center',
-    elevation: 5,
-    shadowColor: '#00E0C6',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 4,
-  },
+  dateBirthdayIcon: { fontSize: 28, marginRight: 12 },
+  dateBirthdayInfo: { flex: 1 },
+  dateBirthdayName: { fontSize: 16, fontWeight: '600', color: '#333' },
+  dateBirthdayRelation: { fontSize: 13, color: '#666', marginTop: 2 },
+  tasksSection: { paddingHorizontal: 20, paddingVertical: 16, backgroundColor: '#fff', marginTop: 16 },
+  sectionTitle: { fontSize: 18, fontWeight: 'bold', color: '#333', marginBottom: 12 },
+  loadingContainer: { alignItems: 'center', padding: 16 },
+  taskListContent: { padding: 12 },
   itemCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: 16,
-    backgroundColor: '#fff',
-    borderRadius: 16,
-    marginBottom: 12,
-    borderLeftWidth: 4,
-    elevation: 2,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 3,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    padding: 16, backgroundColor: '#fff', borderRadius: 16, marginBottom: 12, borderLeftWidth: 4,
+    elevation: 2, shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.1, shadowRadius: 3,
   },
-  itemLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-  },
-  itemIcon: {
-    fontSize: 28,
-    marginRight: 14,
-  },
-  itemInfo: {
-    flex: 1,
-  },
-  itemTitle: {
-    fontSize: 17,
-    fontWeight: '600',
-    color: '#333',
-  },
-  itemTitleCompleted: {
-    textDecorationLine: 'line-through',
-    color: '#999',
-  },
-  itemSubtitle: {
-    fontSize: 14,
-    color: '#666',
-    marginTop: 2,
-  },
-  titleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flexWrap: 'wrap',
-    gap: 8,
-  },
-  priorityBadge: {
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 10,
-  },
-  priorityText: {
-    fontSize: 11,
-    fontWeight: '600',
-  },
-  itemRight: {
-    marginLeft: 12,
-  },
-  checkButton: {
-    padding: 4,
-  },
-  typeBadge: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 12,
-  },
-  typeBadgeText: {
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  emptyState: {
-    alignItems: 'center',
-    paddingVertical: 40,
-  },
-  emptyIcon: {
-    fontSize: 48,
-    marginBottom: 12,
-  },
-  emptyTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: '#333',
-    marginBottom: 4,
-  },
-  emptySubtitle: {
-    fontSize: 14,
-    color: '#999',
-  },
-  birthdaysSection: {
-    paddingHorizontal: 20,
-    paddingVertical: 16,
-    backgroundColor: '#fff',
-    marginTop: 16,
-  },
-  birthdaysList: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-  },
-  birthdayItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    padding: 12,
-    backgroundColor: '#fff8f8',
-    borderRadius: 8,
-    marginRight: 12,
-    marginBottom: 8,
-  },
-  birthdayInfo: {
-    marginLeft: 8,
-  },
-  birthdayName: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#333',
-  },
-  birthdayRelation: {
-    fontSize: 14,
-    color: '#666',
+  itemLeft: { flexDirection: 'row', alignItems: 'center', flex: 1 },
+  checkButton: { padding: 4 },
+  itemInfo: { flex: 1, marginLeft: 8 },
+  itemTitle: { fontSize: 17, fontWeight: '600', color: '#333' },
+  itemTitleCompleted: { textDecorationLine: 'line-through', color: '#999' },
+  itemSubtitle: { fontSize: 14, color: '#666', marginTop: 2 },
+  itemRight: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  priorityDot: { width: 24, height: 24, borderRadius: 12, justifyContent: 'center', alignItems: 'center' },
+  priorityDotText: { fontSize: 12 },
+  actionBtn: { padding: 4 },
+  emptyState: { alignItems: 'center', paddingVertical: 40 },
+  emptyIcon: { fontSize: 48, marginBottom: 12 },
+  emptyTitle: { fontSize: 18, fontWeight: '600', color: '#333', marginBottom: 4 },
+  emptySubtitle: { fontSize: 14, color: '#999' },
+  floatingAddButton: {
+    position: 'absolute', right: 20, bottom: 100, width: 60, height: 60,
+    borderRadius: 30, backgroundColor: '#00E0C6', justifyContent: 'center', alignItems: 'center',
+    elevation: 5, shadowColor: '#00E0C6', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.3, shadowRadius: 4,
   },
   bottomNav: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    backgroundColor: '#fff',
-    paddingTop: 12,
-    borderTopWidth: 1,
-    borderTopColor: '#f0f0f0',
+    position: 'absolute', bottom: 0, left: 0, right: 0, flexDirection: 'row',
+    justifyContent: 'space-around', backgroundColor: '#fff', paddingTop: 12, borderTopWidth: 1, borderTopColor: '#f0f0f0',
   },
-  navItem: {
-    alignItems: 'center',
-    flex: 1,
+  navItem: { alignItems: 'center', flex: 1 },
+  navItemActive: { alignItems: 'center', flex: 1 },
+  navText: { fontSize: 12, marginTop: 4, color: '#888' },
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
+  modalContent: {
+    backgroundColor: '#fff', borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 20,
   },
-  navItemActive: {
-    alignItems: 'center',
-    flex: 1,
+  modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 },
+  modalTitle: { fontSize: 20, fontWeight: '600', color: '#333' },
+  modalInput: {
+    backgroundColor: '#f5f5f5', borderRadius: 12, paddingHorizontal: 16, paddingVertical: 14,
+    fontSize: 16, color: '#333', marginBottom: 16,
   },
-  navText: {
-    fontSize: 12,
-    marginTop: 4,
-    color: '#888',
+  modalTextArea: { minHeight: 80, textAlignVertical: 'top' },
+  modalLabel: { fontSize: 16, fontWeight: '600', color: '#333', marginBottom: 12 },
+  priorityRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 20 },
+  priorityOption: {
+    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 12,
+    borderRadius: 12, borderWidth: 2, borderColor: '#e0e0e0', backgroundColor: '#fff', marginHorizontal: 4,
   },
+  priorityLabel: { fontSize: 14, fontWeight: '600', color: '#666', marginLeft: 4 },
+  dateDisplay: {
+    flexDirection: 'row', alignItems: 'center', backgroundColor: '#E3F2FD', borderRadius: 12, 
+    paddingHorizontal: 16, paddingVertical: 12, marginBottom: 16,
+  },
+  dateDisplayText: { fontSize: 14, color: '#1976D2', marginLeft: 10, fontWeight: '500' },
+  timeSelector: {
+    flexDirection: 'row', alignItems: 'center', backgroundColor: '#f5f5f5', borderRadius: 12, 
+    paddingHorizontal: 16, paddingVertical: 14, marginBottom: 20,
+  },
+  timeSelectorText: { flex: 1, fontSize: 16, color: '#333', marginLeft: 12 },
+  menuOverlay: {
+    flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end',
+  },
+  addMenu: {
+    position: 'absolute', right: 20, backgroundColor: '#fff', borderRadius: 16, 
+    padding: 8, minWidth: 150, elevation: 5, shadowColor: '#000', 
+    shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.25, shadowRadius: 4,
+  },
+  menuItem: {
+    flexDirection: 'row', alignItems: 'center', padding: 14, borderRadius: 12, gap: 12,
+  },
+  menuItemText: { fontSize: 16, fontWeight: '600' },
+  timePickerModal: {
+    backgroundColor: '#fff', borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 20,
+    maxHeight: '60%',
+  },
+  timeList: { maxHeight: 300 },
+  timeOption: {
+    paddingVertical: 16, paddingHorizontal: 20, borderRadius: 12, marginBottom: 8,
+    backgroundColor: '#f5f5f5',
+  },
+  timeOptionSelected: { backgroundColor: '#00E0C6' },
+  timeOptionText: { fontSize: 16, color: '#333', textAlign: 'center' },
+  timeOptionTextSelected: { color: '#fff', fontWeight: '600' },
+  saveButton: {
+    backgroundColor: '#00E0C6', borderRadius: 12, paddingVertical: 14, alignItems: 'center',
+  },
+  saveButtonText: { color: '#fff', fontSize: 16, fontWeight: '600' },
+>>>>>>> Stashed changes
 });
