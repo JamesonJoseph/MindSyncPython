@@ -17,7 +17,7 @@ import { useRouter } from 'expo-router';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import Animated, { useAnimatedStyle, withTiming, useSharedValue, Easing } from 'react-native-reanimated';
 import * as KeepAwake from 'expo-keep-awake';
-import { activateKeepAwakeAsync, deactivateKeepAwakeAsync } from 'expo-keep-awake';
+import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 
 import { useAudioRecorder, RecordingPresets, useAudioRecorderState, requestRecordingPermissionsAsync, setAudioModeAsync } from 'expo-audio';
 import * as Speech from 'expo-speech';
@@ -128,7 +128,7 @@ export default function AvatarScreen() {
   useEffect(() => {
     activateKeepAwakeAsync().catch(() => {});
     return () => {
-      deactivateKeepAwakeAsync().catch(() => {});
+      deactivateKeepAwake().catch(() => {});
     };
   }, []);
 

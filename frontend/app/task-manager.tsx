@@ -19,17 +19,18 @@ import { useRouter } from 'expo-router';
 import { auth } from '../firebaseConfig';
 import { getApiBaseUrl, authFetch } from '../utils/api';
 import { toISTISOString } from '../utils/timezone';
-import { requestNotificationPermissions, scheduleTaskReminder } from '../utils/notifications';
+import { requestNotificationPermissions, scheduleTaskReminder, scheduleEventReminder, scheduleBirthdayReminder } from '../utils/notifications';
 
 // Types
 interface TaskItem {
   _id: string;
+  id?: number | string;
   title: string;
   type: 'event' | 'task' | 'birthday';
   allDay: boolean;
   event_datetime: string;
   reminder_minutes: number;
-  reminder_datetime: string;
+  reminder_datetime?: string;
   status: 'pending' | 'completed';
   created_at: string;
 }
@@ -68,15 +69,13 @@ export default function TaskManagerScreen() {
   const [formDate, setFormDate] = useState('');
   const [formTime, setFormTime] = useState('');
   const [formReminder, setFormReminder] = useState(30);
+  const [showCustomReminder, setShowCustomReminder] = useState(false);
+  const [customReminderValue, setCustomReminderValue] = useState('');
 
   // Load tasks
   const loadTasks = useCallback(async () => {
     if (!userId) {
-      // Load from localStorage
-      const stored = localStorage.getItem('mindsync_tasks');
-      if (stored) {
-        setTasks(JSON.parse(stored));
-      }
+      setTasks([]);
       return;
     }
 
@@ -86,14 +85,10 @@ export default function TaskManagerScreen() {
       if (res.ok) {
         const data: TaskItem[] = await res.json();
         setTasks(data);
-        localStorage.setItem('mindsync_tasks', JSON.stringify(data));
       }
     } catch (error) {
       console.log('Error loading tasks:', error);
-      const stored = localStorage.getItem('mindsync_tasks');
-      if (stored) {
-        setTasks(JSON.parse(stored) as TaskItem[]);
-      }
+      Alert.alert('Error', 'Failed to load tasks. Please check your connection.');
     } finally {
       setIsLoading(false);
     }
@@ -102,11 +97,6 @@ export default function TaskManagerScreen() {
   useEffect(() => {
     loadTasks();
   }, [loadTasks]);
-
-  // Save to localStorage
-  const saveTasksToStorage = (taskList: TaskItem[]) => {
-    localStorage.setItem('mindsync_tasks', JSON.stringify(taskList));
-  };
 
   // Open add menu
   const handleOpenMenu = () => {
@@ -187,6 +177,7 @@ export default function TaskManagerScreen() {
       }
 
       const newTask: TaskItem = {
+        _id: editingTask?._id || '',
         id: editingTask?.id || Date.now(),
         title: formTitle.trim(),
         type: formType,
@@ -245,7 +236,6 @@ export default function TaskManagerScreen() {
         }
         
         setTasks(updatedTasks);
-        saveTasksToStorage(updatedTasks);
         setShowFormModal(false);
         setEditingTask(null);
 
@@ -322,7 +312,6 @@ export default function TaskManagerScreen() {
               }
               const updatedTasks = tasks.filter(t => t.id !== task.id);
               setTasks(updatedTasks);
-              saveTasksToStorage(updatedTasks);
             } catch (error) {
               console.log('Error deleting task:', error);
             }
@@ -348,7 +337,6 @@ export default function TaskManagerScreen() {
 
       const updatedTasks: TaskItem[] = tasks.map(t => t.id === task.id ? updatedTask : t);
       setTasks(updatedTasks);
-      saveTasksToStorage(updatedTasks);
     } catch (error) {
       console.log('Error toggling status:', error);
     }
@@ -434,7 +422,7 @@ export default function TaskManagerScreen() {
       {/* Task List */}
       <FlatList
         data={filteredTasks}
-        keyExtractor={(item) => item.id.toString()}
+        keyExtractor={(item) => item._id}
         contentContainerStyle={styles.listContent}
         showsVerticalScrollIndicator={false}
         ListEmptyComponent={
@@ -643,21 +631,13 @@ export default function TaskManagerScreen() {
                        </Text>
                      </TouchableOpacity>
                    ))}
-                   <TouchableOpacity
-                     style={[styles.reminderOption, { flex: 1, marginLeft: 10 }]}
-                     onPress={() => {
-                       // Show custom input prompt
-                       const customMinutes = prompt('Enter custom reminder minutes (e.g., 45):', formReminder.toString());
-                       if (customMinutes !== null) {
-                         const parsed = parseInt(customMinutes, 10);
-                         if (!isNaN(parsed) && parsed >= 0) {
-                           setFormReminder(parsed);
-                         } else {
-                           Alert.alert('Invalid input', 'Please enter a valid number of minutes');
-                         }
-                       }
-                     }}
-                   >
+                    <TouchableOpacity
+                      style={[styles.reminderOption, { flex: 1, marginLeft: 10 }]}
+                      onPress={() => {
+                        setCustomReminderValue(formReminder.toString());
+                        setShowCustomReminder(true);
+                      }}
+                    >
                      <Text style={[
                        styles.reminderOptionText,
                        ![0, 15, 30, 60].includes(formReminder) && styles.reminderOptionTextActive
@@ -670,6 +650,43 @@ export default function TaskManagerScreen() {
 
               <View style={{ height: 40 }} />
             </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Custom Reminder Modal */}
+      <Modal visible={showCustomReminder} transparent animationType="fade">
+        <View style={styles.modalOverlay}>
+          <View style={[styles.customReminderModal, { paddingBottom: insets.bottom + 20 }]}>
+            <View style={styles.formHeader}>
+              <TouchableOpacity onPress={() => setShowCustomReminder(false)}>
+                <Ionicons name="close" size={24} color="#E0E0E0" />
+              </TouchableOpacity>
+              <Text style={styles.formTitle}>Custom Reminder</Text>
+              <TouchableOpacity onPress={() => {
+                const parsed = parseInt(customReminderValue, 10);
+                if (!isNaN(parsed) && parsed >= 0) {
+                  setFormReminder(parsed);
+                  setShowCustomReminder(false);
+                } else {
+                  Alert.alert('Invalid input', 'Please enter a valid number of minutes');
+                }
+              }}>
+                <Text style={styles.saveButton}>Set</Text>
+              </TouchableOpacity>
+            </View>
+            <View style={styles.formContent}>
+              <Text style={styles.formLabel}>Minutes before event</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="e.g., 45"
+                placeholderTextColor="#666"
+                value={customReminderValue}
+                onChangeText={setCustomReminderValue}
+                keyboardType="numeric"
+                autoFocus
+              />
+            </View>
           </View>
         </View>
       </Modal>
@@ -968,5 +985,11 @@ const styles = StyleSheet.create({
   },
   reminderOptionTextActive: {
     color: '#fff',
+  },
+  customReminderModal: {
+    backgroundColor: '#1A1A2E',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    maxHeight: '50%',
   },
 });

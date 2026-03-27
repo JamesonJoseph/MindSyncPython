@@ -343,16 +343,27 @@ export default function ChatScreen() {
         throw new Error(message);
       }
 
-      setMessages(prev => [
-        ...prev,
-        {
-          id: `${Date.now()}-assistant`,
-          role: 'assistant',
-          content: typeof data?.content === 'string' && data.content.trim()
-            ? data.content
-            : 'I am here with you. Tell me more about how this day felt for you.'
+      const assistantMsg: Message = {
+        id: `${Date.now()}-assistant`,
+        role: 'assistant',
+        content: typeof data?.content === 'string' && data.content.trim()
+          ? data.content
+          : 'I am here with you. Tell me more about how this day felt for you.'
+      };
+
+      setMessages(prev => {
+        const finalMessages = [...prev, assistantMsg];
+
+        // Auto-save if this is the first assistant response and it's not already saved
+        if (!conversationId && finalMessages.filter(m => m.role === 'user').length >= 1) {
+          // We use a small timeout to let state update or just call saveConversation with messages
+          setTimeout(() => {
+            saveConversation(finalMessages);
+          }, 500);
         }
-      ]);
+
+        return finalMessages;
+      });
     } catch (error) {
       if (!isTimeoutError(error)) {
         console.warn("Chat network error:", error);
@@ -404,15 +415,16 @@ export default function ChatScreen() {
     requestAssistantReply(updatedMessages);
   };
 
-  const saveConversation = async () => {
-    if (messages.length === 0) {
-      Alert.alert('Nothing to Save', 'Start a conversation first.');
+  const saveConversation = async (messagesToSave?: Message[]) => {
+    const targetMessages = messagesToSave || messages;
+    if (targetMessages.length === 0) {
+      if (!messagesToSave) Alert.alert('Nothing to Save', 'Start a conversation first.');
       return;
     }
 
     const user = auth.currentUser;
     if (!user?.uid) {
-      Alert.alert('Authentication Required', 'Please log in to save the chat.');
+      if (!messagesToSave) Alert.alert('Authentication Required', 'Please log in to save the chat.');
       return;
     }
 
@@ -427,7 +439,7 @@ export default function ChatScreen() {
           conversationId: conversationId || undefined,
           contextType: typeof rawContextType === 'string' ? rawContextType : undefined,
           context,
-          messages: messages.map(message => ({
+          messages: targetMessages.map(message => ({
             role: message.role,
             content: message.content,
           })),
@@ -455,7 +467,7 @@ export default function ChatScreen() {
             title: typeof data?.title === 'string' ? data.title : 'MindSync Chat',
             contextType: typeof data?.contextType === 'string' ? data.contextType : (typeof rawContextType === 'string' ? rawContextType : 'general'),
             context,
-            messages: messages.map(message => ({
+            messages: targetMessages.map(message => ({
               role: message.role,
               content: message.content,
             })),
@@ -471,8 +483,8 @@ export default function ChatScreen() {
           _id: typeof data?._id === 'string' ? data._id : conversationId,
           title: typeof data?.title === 'string' ? data.title : 'MindSync Chat',
           contextType: typeof data?.contextType === 'string' ? data.contextType : (typeof rawContextType === 'string' ? rawContextType : 'general'),
-          messageCount: Array.isArray(data?.messages) ? data.messages.length : messages.length,
-          lastMessage: messages[messages.length - 1]?.content || '',
+          messageCount: Array.isArray(data?.messages) ? data.messages.length : targetMessages.length,
+          lastMessage: targetMessages[targetMessages.length - 1]?.content || '',
           updatedAt: typeof data?.updatedAt === 'string' ? data.updatedAt : new Date().toISOString(),
         };
         const deduped = [savedPreview, ...nextChats.filter((item: ConversationSummary) => item?._id !== savedPreview._id)].slice(0, 5);
@@ -481,12 +493,12 @@ export default function ChatScreen() {
       } catch (error) {
         console.warn('Failed to update recent chats cache after save', error);
       }
-      Alert.alert('Saved', 'The full conversation has been saved.');
+      if (!messagesToSave) Alert.alert('Saved', 'The full conversation has been saved.');
     } catch (error) {
       if (!isTimeoutError(error)) {
         console.warn('Failed to save conversation', error);
       }
-      Alert.alert('Error', error instanceof Error ? error.message : 'Failed to save conversation.');
+      if (!messagesToSave) Alert.alert('Error', error instanceof Error ? error.message : 'Failed to save conversation.');
     } finally {
       setSavingConversation(false);
     }

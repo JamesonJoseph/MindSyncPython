@@ -199,20 +199,6 @@ export default function AddTaskScreen() {
         }
       }
 
-      // If API failed, save locally as fallback
-      if (!savedSuccessfully) {
-        console.log('Saving task locally as fallback');
-        const localTasks = await AsyncStorage.getItem('mindsync_tasks');
-        const existingTasks = localTasks ? JSON.parse(localTasks) : [];
-        const newTask = {
-          _id: Date.now().toString(),
-          ...taskData,
-          created_at: new Date().toISOString(),
-        };
-        await AsyncStorage.setItem('mindsync_tasks', JSON.stringify([...existingTasks, newTask]));
-        savedSuccessfully = true;
-      }
-
       if (savedSuccessfully) {
         Alert.alert('Success', 'Task saved successfully!', [
           { text: 'OK', onPress: () => router.back() }

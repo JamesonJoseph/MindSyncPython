@@ -30,6 +30,9 @@ type Task = {
   date?: string;
   event_datetime?: string;
   time?: string;
+  type?: string;
+  allDay?: boolean;
+  reminder_minutes?: number;
 };
 
 type Birthday = {
@@ -110,9 +113,11 @@ export default function TasksScreen() {
    };
 
   const getDateKeyFromDate = (date: Date): string => {
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, '0');
-    const day = String(date.getDate()).padStart(2, '0');
+    // Convert to IST to ensure consistency with getISTDateKey
+    const istDate = fromISOToIST(date.toISOString());
+    const year = istDate.getFullYear();
+    const month = String(istDate.getMonth() + 1).padStart(2, '0');
+    const day = String(istDate.getDate()).padStart(2, '0');
     return `${year}-${month}-${day}`;
   };
 
@@ -175,20 +180,7 @@ export default function TasksScreen() {
       } catch (fetchError: any) {
         clearTimeout(timeoutId);
         console.log('Fetch error in loadData:', fetchError);
->>>>>>> Stashed changes
       }
-
-      const items = Array.isArray(data) ? data : [];
-      const typedData: Task[] = items.map((item: any) => ({
-        _id: item._id || '',
-        title: item.title || '',
-        description: item.description || '',
-        status: item.status === 'completed' ? 'completed' : 'pending'
-      }));
-      setTasksByDate(prev => ({
-        ...prev,
-        [dateString]: typedData
-      }));
     } catch (error) {
       console.log('Error loading data', error);
     } finally {
@@ -282,7 +274,7 @@ export default function TasksScreen() {
      const event_datetime = taskTime ? toISTISOString(dateStr, taskTime) : toISTISOString(dateStr);
      
      // Optimistically add task to local state
-     const newTask = {
+     const newTask: Task = {
        _id: Date.now().toString(), // Temporary ID
        title: newTaskTitle.trim(),
        description: taskDescription,
@@ -335,6 +327,14 @@ export default function TasksScreen() {
          // For simplicity, we'll just show an error and let user retry
          Alert.alert('Error', 'Failed to save task. Please try again.');
          loadData(); // Reload to get correct state
+       } else {
+         // Success
+         setShowTaskModal(false);
+         setNewTaskTitle('');
+         setTaskDescription('');
+         setTaskTime('');
+         setTaskPriority('medium');
+         loadData(); // Refresh list
        }
      } catch (error) {
        console.log('Error adding task', error);
@@ -1045,5 +1045,4 @@ const styles = StyleSheet.create({
     backgroundColor: '#00E0C6', borderRadius: 12, paddingVertical: 14, alignItems: 'center',
   },
   saveButtonText: { color: '#fff', fontSize: 16, fontWeight: '600' },
->>>>>>> Stashed changes
 });

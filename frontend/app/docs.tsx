@@ -570,6 +570,7 @@ function AddVaultEntryModal({
   initialEntry?: VaultEntry | null;
   onSave?: (updates: Partial<VaultEntry>) => Promise<void>;
 }) {
+  const insets = useSafeAreaInsets();
   const { addEntry } = useVault();
   const isEditing = !!initialEntry;
   const [entryType, setEntryType] = useState<VaultEntryType>(initialEntry?.entryType || 'pdf');
@@ -736,164 +737,166 @@ function AddVaultEntryModal({
   };
 
   return (
-    <KeyboardAvoidingView
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      style={styles.modalOverlay}
-    >
-      <View style={styles.modalContent}>
-        <View style={styles.modalHeader}>
-          <Text style={styles.modalTitle}>{isEditing ? 'Edit Item' : 'Add Secure Item'}</Text>
-          <TouchableOpacity onPress={onClose}>
-            <Ionicons name="close" size={24} color="#333" />
-          </TouchableOpacity>
-        </View>
-
-        <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 40 }}>
-          <Text style={styles.inputLabel}>Type</Text>
-          <View style={styles.selectorRow}>
-            {(Object.keys(ENTRY_CONFIG) as VaultEntryType[]).map(type => (
-              <TouchableOpacity
-                key={type}
-                style={[styles.selectorChip, entryType === type && styles.selectorChipActive]}
-                onPress={() => setEntryType(type)}
-                disabled={isEditing}
-              >
-                <MaterialCommunityIcons
-                  name={ENTRY_CONFIG[type].icon as any}
-                  size={16}
-                  color={entryType === type ? '#fff' : ENTRY_CONFIG[type].accent}
-                />
-                <Text style={[styles.selectorChipText, entryType === type && styles.selectorChipTextActive]}>
-                  {ENTRY_CONFIG[type].label}
-                </Text>
-              </TouchableOpacity>
-            ))}
+    <Modal visible transparent animationType="slide" onRequestClose={onClose}>
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        style={styles.modalOverlay}
+      >
+        <View style={[styles.modalContent, { paddingBottom: Math.max(insets.bottom, 20) }]}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>{isEditing ? 'Edit Item' : 'Add Secure Item'}</Text>
+            <TouchableOpacity onPress={onClose}>
+              <Ionicons name="close" size={24} color="#333" />
+            </TouchableOpacity>
           </View>
 
-          <Text style={styles.inputLabel}>Title</Text>
-          <TextInput
-            style={styles.modalInput}
-            placeholder="Enter title"
-            value={title}
-            onChangeText={setTitle}
-            placeholderTextColor="#999"
-          />
-
-          <Text style={styles.inputLabel}>Folder</Text>
-          <TextInput
-            style={styles.modalInput}
-            placeholder="General, Finance, Work..."
-            value={folder}
-            onChangeText={setFolder}
-            placeholderTextColor="#999"
-          />
-
-          {entryType === 'password' && (
-            <>
-              <Text style={styles.inputLabel}>Username / Email</Text>
-              <TextInput
-                style={styles.modalInput}
-                placeholder="Enter username or email"
-                value={username}
-                onChangeText={setUsername}
-                placeholderTextColor="#999"
-                autoCapitalize="none"
-              />
-
-              <Text style={styles.inputLabel}>Password / Secret</Text>
-              <View style={styles.passwordContainer}>
-                <TextInput
-                  style={[styles.modalInput, { flex: 1 }]}
-                  placeholder="Enter password or secret"
-                  value={password}
-                  onChangeText={setPassword}
-                  placeholderTextColor="#999"
-                  secureTextEntry={!showPassword}
-                />
-                <TouchableOpacity style={styles.eyeButton} onPress={() => setShowPassword(!showPassword)}>
-                  <Ionicons name={showPassword ? 'eye-off' : 'eye'} size={24} color="#999" />
+          <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 20 }}>
+            <Text style={styles.inputLabel}>Type</Text>
+            <View style={styles.selectorRow}>
+              {(Object.keys(ENTRY_CONFIG) as VaultEntryType[]).map(type => (
+                <TouchableOpacity
+                  key={type}
+                  style={[styles.selectorChip, entryType === type && styles.selectorChipActive]}
+                  onPress={() => setEntryType(type)}
+                  disabled={isEditing}
+                >
+                  <MaterialCommunityIcons
+                    name={ENTRY_CONFIG[type].icon as any}
+                    size={16}
+                    color={entryType === type ? '#fff' : ENTRY_CONFIG[type].accent}
+                  />
+                  <Text style={[styles.selectorChipText, entryType === type && styles.selectorChipTextActive]}>
+                    {ENTRY_CONFIG[type].label}
+                  </Text>
                 </TouchableOpacity>
-              </View>
-            </>
-          )}
+              ))}
+            </View>
 
-          {entryType === 'url' && (
-            <>
-              <Text style={styles.inputLabel}>URL</Text>
-              <TextInput
-                style={styles.modalInput}
-                placeholder="https://..."
-                value={url}
-                onChangeText={setUrl}
-                placeholderTextColor="#999"
-                autoCapitalize="none"
-              />
-            </>
-          )}
+            <Text style={styles.inputLabel}>Title</Text>
+            <TextInput
+              style={styles.modalInput}
+              placeholder="Enter title"
+              value={title}
+              onChangeText={setTitle}
+              placeholderTextColor="#999"
+            />
 
-          {entryType === 'pdf' && (
-            <>
-              <Text style={styles.inputLabel}>PDF File</Text>
-              <TouchableOpacity style={styles.pdfPickerButton} onPress={pickPdf} disabled={isPickingPdf || isUploadingPdf}>
-                {isPickingPdf ? (
-                  <ActivityIndicator color="#111827" size="small" />
-                ) : (
-                  <MaterialCommunityIcons name="file-upload-outline" size={20} color="#111827" />
-                )}
-                <Text style={styles.pdfPickerButtonText}>
-                  {fileName ? 'Choose Another PDF' : 'Pick PDF File'}
-                </Text>
-              </TouchableOpacity>
+            <Text style={styles.inputLabel}>Folder</Text>
+            <TextInput
+              style={styles.modalInput}
+              placeholder="General, Finance, Work..."
+              value={folder}
+              onChangeText={setFolder}
+              placeholderTextColor="#999"
+            />
 
-              <View style={styles.pdfInfoCard}>
-                <Text style={styles.pdfInfoTitle}>{fileName || 'No PDF selected yet'}</Text>
-                <Text style={styles.pdfInfoMeta}>
-                  {fileSize > 0 ? `${(fileSize / 1024 / 1024).toFixed(2)} MB` : 'Select a PDF up to 6 MB'}
-                </Text>
-              </View>
-            </>
-          )}
+            {entryType === 'password' && (
+              <>
+                <Text style={styles.inputLabel}>Username / Email</Text>
+                <TextInput
+                  style={styles.modalInput}
+                  placeholder="Enter username or email"
+                  value={username}
+                  onChangeText={setUsername}
+                  placeholderTextColor="#999"
+                  autoCapitalize="none"
+                />
 
-          {entryType === 'text' && (
-            <>
-              <Text style={styles.inputLabel}>Text Message</Text>
-              <TextInput
-                style={[styles.modalInput, styles.multilineInput]}
-                placeholder="Store your private text here..."
-                value={content}
-                onChangeText={setContent}
-                placeholderTextColor="#999"
-                multiline
-                textAlignVertical="top"
-              />
-            </>
-          )}
-
-          <Text style={styles.inputLabel}>Notes</Text>
-          <TextInput
-            style={[styles.modalInput, styles.multilineInput]}
-            placeholder="Optional notes"
-            value={notes}
-            onChangeText={setNotes}
-            placeholderTextColor="#999"
-            multiline
-            textAlignVertical="top"
-          />
-
-          <TouchableOpacity
-            style={[styles.saveButton, isUploadingPdf && { opacity: 0.7 }]}
-            onPress={handleSave}
-            disabled={isUploadingPdf}
-          >
-            {isUploadingPdf ? (
-              <ActivityIndicator color="#fff" size="small" />
-            ) : (
-              <Text style={styles.saveButtonText}>{isEditing ? 'Update Item' : 'Save Item'}</Text>
+                <Text style={styles.inputLabel}>Password / Secret</Text>
+                <View style={styles.passwordContainer}>
+                  <TextInput
+                    style={[styles.modalInput, { flex: 1 }]}
+                    placeholder="Enter password or secret"
+                    value={password}
+                    onChangeText={setPassword}
+                    placeholderTextColor="#999"
+                    secureTextEntry={!showPassword}
+                  />
+                  <TouchableOpacity style={styles.eyeButton} onPress={() => setShowPassword(!showPassword)}>
+                    <Ionicons name={showPassword ? 'eye-off' : 'eye'} size={24} color="#999" />
+                  </TouchableOpacity>
+                </View>
+              </>
             )}
-          </TouchableOpacity>
-        </ScrollView>
-      </View>
-    </KeyboardAvoidingView>
+
+            {entryType === 'url' && (
+              <>
+                <Text style={styles.inputLabel}>URL</Text>
+                <TextInput
+                  style={styles.modalInput}
+                  placeholder="https://..."
+                  value={url}
+                  onChangeText={setUrl}
+                  placeholderTextColor="#999"
+                  autoCapitalize="none"
+                />
+              </>
+            )}
+
+            {entryType === 'pdf' && (
+              <>
+                <Text style={styles.inputLabel}>PDF File</Text>
+                <TouchableOpacity style={styles.pdfPickerButton} onPress={pickPdf} disabled={isPickingPdf || isUploadingPdf}>
+                  {isPickingPdf ? (
+                    <ActivityIndicator color="#111827" size="small" />
+                  ) : (
+                    <MaterialCommunityIcons name="file-upload-outline" size={20} color="#111827" />
+                  )}
+                  <Text style={styles.pdfPickerButtonText}>
+                    {fileName ? 'Choose Another PDF' : 'Pick PDF File'}
+                  </Text>
+                </TouchableOpacity>
+
+                <View style={styles.pdfInfoCard}>
+                  <Text style={styles.pdfInfoTitle}>{fileName || 'No PDF selected yet'}</Text>
+                  <Text style={styles.pdfInfoMeta}>
+                    {fileSize > 0 ? `${(fileSize / 1024 / 1024).toFixed(2)} MB` : 'Select a PDF up to 6 MB'}
+                  </Text>
+                </View>
+              </>
+            )}
+
+            {entryType === 'text' && (
+              <>
+                <Text style={styles.inputLabel}>Text Message</Text>
+                <TextInput
+                  style={[styles.modalInput, styles.multilineInput]}
+                  placeholder="Store your private text here..."
+                  value={content}
+                  onChangeText={setContent}
+                  placeholderTextColor="#999"
+                  multiline
+                  textAlignVertical="top"
+                />
+              </>
+            )}
+
+            <Text style={styles.inputLabel}>Notes</Text>
+            <TextInput
+              style={[styles.modalInput, styles.multilineInput]}
+              placeholder="Optional notes"
+              value={notes}
+              onChangeText={setNotes}
+              placeholderTextColor="#999"
+              multiline
+              textAlignVertical="top"
+            />
+
+            <TouchableOpacity
+              style={[styles.saveButton, isUploadingPdf && { opacity: 0.7 }]}
+              onPress={handleSave}
+              disabled={isUploadingPdf}
+            >
+              {isUploadingPdf ? (
+                <ActivityIndicator color="#fff" size="small" />
+              ) : (
+                <Text style={styles.saveButtonText}>{isEditing ? 'Update Item' : 'Save Item'}</Text>
+              )}
+            </TouchableOpacity>
+          </ScrollView>
+        </View>
+      </KeyboardAvoidingView>
+    </Modal>
   );
 }
 
@@ -1279,11 +1282,7 @@ const styles = StyleSheet.create({
     color: '#888',
   },
   modalOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
+    flex: 1,
     backgroundColor: 'rgba(0,0,0,0.5)',
     justifyContent: 'flex-end',
   },
@@ -1292,7 +1291,7 @@ const styles = StyleSheet.create({
     borderTopLeftRadius: 20,
     borderTopRightRadius: 20,
     padding: 20,
-    maxHeight: '88%',
+    maxHeight: '90%',
   },
   modalHeader: {
     flexDirection: 'row',
