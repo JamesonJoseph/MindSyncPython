@@ -1,7 +1,7 @@
 import Constants from 'expo-constants';
 import { auth } from '../firebaseConfig';
 
-const API_PORT = '5000';
+const API_PORT = '5001';
 
 function normalizeBaseUrl(value: string | null | undefined): string | null {
   const trimmed = String(value || '').trim();

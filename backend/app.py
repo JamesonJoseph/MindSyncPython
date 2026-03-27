@@ -42,7 +42,8 @@ GEMINI_API_KEY = (
     os.getenv("GEMINI_API_KEY", "").strip()
     or os.getenv("EXPO_PUBLIC_GEMINI_API_KEY", "").strip()
 )
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip() 
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash").strip()
+ 
 PORT = int(os.getenv("PORT", "5000"))
 DB_CONNECT_TIMEOUT_MS = int(os.getenv("DB_CONNECT_TIMEOUT_MS", "8000"))
 ANALYZE_TIMEOUT_SECONDS = float(os.getenv("ANALYZE_TIMEOUT_SECONDS", "12"))
@@ -342,11 +343,13 @@ def _request_plain_chat_completion(messages: list[dict]) -> str:
     return response.choices[0].message.content if response.choices else ""
 
 
+# ==================== DOCUMENTS / SECURE VAULT ====================
+
 @app.get("/api/documents")
 async def get_documents(request: Request):
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
-    _, _, _, _, _, _, documents, _, _ = _get_collections()
+    _, _, _, _, _, _, documents, _, _, _ = _get_collections()
     docs = list(documents.find({"userId": uid}).sort("date", DESCENDING))
     return [_serialize_doc(doc) for doc in docs]
 
@@ -356,7 +359,7 @@ async def create_document(request: Request):
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
     email = auth_info.get("email")
-    _, _, _, _, _, _, documents, _, _ = _get_collections()
+    _, _, _, _, _, _, documents, _, _, _ = _get_collections()
     payload = await request.json()
 
     doc = {
@@ -426,7 +429,7 @@ async def delete_document_pdf(path: str, request: Request):
 async def update_document(doc_id: str, request: Request):
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
-    _, _, _, _, _, _, documents, _, _ = _get_collections()
+    _, _, _, _, _, _, documents, _, _, _ = _get_collections()
     oid = _parse_object_id(doc_id)
     payload = await request.json()
     updates = {
@@ -445,13 +448,12 @@ async def update_document(doc_id: str, request: Request):
 async def delete_document(doc_id: str, request: Request):
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
-    _, _, _, _, _, _, documents, _, _ = _get_collections()
+    _, _, _, _, _, _, documents, _, _, _ = _get_collections()
     oid = _parse_object_id(doc_id)
     result = documents.delete_one({"_id": oid, "userId": uid})
     if result.deleted_count == 0:
         return JSONResponse(status_code=404, content={"error": "Document not found"})
     return {"message": "Document deleted successfully"}
->>>>>>> origin/master
 
 def _get_gemini_http_client() -> httpx.AsyncClient:
     global _gemini_http_client
@@ -520,7 +522,7 @@ async def _analyze_with_gemini(base64_image: str, mime_type: str) -> dict:
     prompt = (
         "Analyze the face in this image for micro-expressions. Return strictly valid JSON with keys: emotion, confidence, details. "
         "The emotion must be exactly one of: happy, sad, angry, surprise, fear, disgust, neutral. "
-        "Confidence is 0-100. Details should be a short 1-sentence analysis of the subtle facial cues. If you detect conflicting micro-expressions (like a fake smile), note it in the details."
+        "Confidence is 0-100. Details should be a short 1-sentence analysis of the subtle facial cues. If you detect conflicting micro-expressions (like a fake smile), note it in the details.(make sure to do an  extra  bit of  thinking as the  faces are indian so its hard to read em)"
     )
     
     payload = {
@@ -560,7 +562,7 @@ def health_check():
 async def get_journals(request: Request):
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
-    journals, _, _, _, _, _, _, _, _ = _get_collections()
+    journals, _, _, _, _, _, _, _, _, _ = _get_collections()
     docs = list(journals.find({"userId": uid}).sort("date", DESCENDING))
     return [_serialize_doc(doc) for doc in docs]
 
@@ -577,7 +579,7 @@ async def search_journals(
         auth_info = await _require_auth(request)
         uid = auth_info.get("uid")
         query = _build_journal_query(user_id=uid, start_date=startDate, end_date=endDate, text_query=q)
-        journals, _, _, _, _, _, _, _, _ = _get_collections()
+        journals, _, _, _, _, _, _, _, _, _ = _get_collections()
         direction = ASCENDING if sort.lower() == "asc" else DESCENDING
         docs = list(journals.find(query).sort("date", direction).limit(limit))
         return [_serialize_doc(doc) for doc in docs]
@@ -588,7 +590,7 @@ async def search_journals(
 
 @app.post("/api/journals")
 async def create_journal(request: Request):
-    journals, _, _, _, _, _, _, _, _ = _get_collections()
+    journals, _, _, _, _, _, _, _, _, _ = _get_collections()
     auth_info = await _require_auth(request)
     payload = await request.json()
     doc = {
@@ -611,7 +613,7 @@ async def delete_journal(journal_id: str, request: Request):
     try:
         auth_info = await _require_auth(request)
         uid = auth_info.get("uid")
-        journals, _, _, _, _, _, _, _, _ = _get_collections()
+        journals, _, _, _, _, _, _, _, _, _ = _get_collections()
         oid = _parse_object_id(journal_id)
         result = journals.delete_one({"_id": oid, "userId": uid})
         if result.deleted_count == 0:
@@ -627,7 +629,7 @@ async def update_journal(journal_id: str, request: Request):
     try:
         auth_info = await _require_auth(request)
         uid = auth_info.get("uid")
-        journals, _, _, _, _, _, _, _, _ = _get_collections()
+        journals, _, _, _, _, _, _, _, _, _ = _get_collections()
         oid = _parse_object_id(journal_id)
         payload = await request.json()
         allowed_fields = {"title", "content", "date", "sentimentScore", "aiAnalysis"}
@@ -661,7 +663,7 @@ def _parse_iso_datetime(raw_value: str | None) -> datetime | None:
 async def get_tasks(request: Request):
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
-    _, _, tasks, _, _, _, _, _, _ = _get_collections()
+    _, _, tasks, _, _, _, _, _, _, _ = _get_collections()
     docs = list(tasks.find({"userId": uid}).sort("event_datetime", ASCENDING))
     return [_serialize_doc(doc) for doc in docs]
 
@@ -670,7 +672,7 @@ async def create_task(request: Request):
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
     email = auth_info.get("email")
-    _, _, tasks, _, _, _, _, _, _ = _get_collections()
+    _, _, tasks, _, _, _, _, _, _, _ = _get_collections()
     payload = await request.json()
     event_datetime = _parse_iso_datetime(payload.get("event_datetime")) or _utc_now()
     reminder_minutes = int(payload.get("reminder_minutes", 30))
@@ -705,7 +707,7 @@ async def update_task(task_id: str, request: Request):
     try:
         auth_info = await _require_auth(request)
         uid = auth_info.get("uid")
-        _, _, tasks, _, _, _, _, _, _ = _get_collections()
+        _, _, tasks, _, _, _, _, _, _, _ = _get_collections()
         oid = _parse_object_id(task_id)
         payload = await request.json()
         
@@ -769,7 +771,7 @@ async def delete_task(task_id: str, request: Request):
     try:
         auth_info = await _require_auth(request)
         uid = auth_info.get("uid")
-        _, _, tasks, _, _, _, _, _, _ = _get_collections()
+        _, _, tasks, _, _, _, _, _, _, _ = _get_collections()
         oid = _parse_object_id(task_id)
         
         result = tasks.delete_one({"_id": oid, "userId": uid})
@@ -792,7 +794,7 @@ async def delete_task(task_id: str, request: Request):
 async def get_birthdays(request: Request):
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
-    _, _, _, _, _, _, _, birthdays, _ = _get_collections()
+    _, _, _, _, _, _, _, birthdays, _, _ = _get_collections()
     docs = list(birthdays.find({"userId": uid}))
     return [_serialize_doc(doc) for doc in docs]
 
@@ -800,7 +802,7 @@ async def get_birthdays(request: Request):
 async def create_birthday(request: Request):
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
-    _, _, _, _, _, _, _, birthdays, _ = _get_collections()
+    _, _, _, _, _, _, _, birthdays, _, _ = _get_collections()
     payload = await request.json()
     
     birthday_date = payload.get("date", "")
@@ -834,7 +836,7 @@ async def update_birthday(birthday_id: str, request: Request):
     try:
         auth_info = await _require_auth(request)
         uid = auth_info.get("uid")
-        _, _, _, _, _, _, _, birthdays, _ = _get_collections()
+        _, _, _, _, _, _, _, birthdays, _, _ = _get_collections()
         oid = _parse_object_id(birthday_id)
         payload = await request.json()
         
@@ -866,7 +868,7 @@ async def delete_birthday(birthday_id: str, request: Request):
     try:
         auth_info = await _require_auth(request)
         uid = auth_info.get("uid")
-        _, _, _, _, _, _, _, birthdays, _ = _get_collections()
+        _, _, _, _, _, _, _, birthdays, _, _ = _get_collections()
         oid = _parse_object_id(birthday_id)
         result = birthdays.delete_one({"_id": oid, "userId": uid})
         if result.deleted_count == 0:
@@ -884,7 +886,7 @@ async def delete_birthday(birthday_id: str, request: Request):
 async def get_events(request: Request, date: str | None = None):
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
-    _, _, _, _, _, _, _, _, events = _get_collections()
+    _, _, _, _, _, _, _, _, events, _ = _get_collections()
     
     query = {"userId": uid}
     if date:
@@ -897,7 +899,7 @@ async def get_events(request: Request, date: str | None = None):
 async def create_event(request: Request):
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
-    _, _, _, _, _, _, _, _, events = _get_collections()
+    _, _, _, _, _, _, _, _, events, _ = _get_collections()
     payload = await request.json()
     
     event_date = payload.get("date", "")
@@ -927,7 +929,7 @@ async def update_event(event_id: str, request: Request):
     try:
         auth_info = await _require_auth(request)
         uid = auth_info.get("uid")
-        _, _, _, _, _, _, _, _, events = _get_collections()
+        _, _, _, _, _, _, _, _, events, _ = _get_collections()
         oid = _parse_object_id(event_id)
         payload = await request.json()
         
@@ -958,7 +960,7 @@ async def delete_event(event_id: str, request: Request):
     try:
         auth_info = await _require_auth(request)
         uid = auth_info.get("uid")
-        _, _, _, _, _, _, _, _, events = _get_collections()
+        _, _, _, _, _, _, _, _, events, _ = _get_collections()
         oid = _parse_object_id(event_id)
         result = events.delete_one({"_id": oid, "userId": uid})
         if result.deleted_count == 0:
@@ -1028,10 +1030,10 @@ async def detect_emotion(
         }
 
         try:
-            _, emotion_history, _, _, _, _, _, _, _ = _get_collections()
-            emotion_history.insert_one(emotion_doc)
-        except PyMongoError:
-            pass 
+            _, emotionhistories, _, _, _, _, _, _, _, _ = _get_collections()
+            emotionhistories.insert_one(emotion_doc)
+        except PyMongoError as pe:
+            print(f"[emotion] db insert failed: {pe}")
 
         return emotion_data
     except Exception as e:
@@ -1048,6 +1050,7 @@ async def chat_agent(request: Request):
     """
     AI Chat Agent using Groq and Function Calling.
     Provides tools for the AI to manage Tasks and read Journals.
+    Supports multi-turn conversations and context types.
     """
     if not groq_client:
         return JSONResponse(status_code=500, content={"error": "Groq client not configured"})
@@ -1056,32 +1059,10 @@ async def chat_agent(request: Request):
     uid = auth_info.get("uid")
     email = auth_info.get("email")
     
-<<<<<<< HEAD
-    payload = await request.json()
-    user_message = payload.get("message", "") # Latest user message
-    
-    # Get recent conversation history from DB for context
-    _, _, _, _, _, _, avatar_col = _get_collections()
-    
-    # Fetch last 20 conversation pairs
-    history_cursor = avatar_col.find({"userId": uid}).sort("date", DESCENDING).limit(20)
-    history = list(history_cursor)
-    history.reverse() # Oldest first for LLM
-    
-    # Format history for LLM context
-    messages = []
-    for h in history:
-        messages.append({"role": "user", "content": h.get("user_query", "")})
-        messages.append({"role": "assistant", "content": h.get("assistant_response", "")})
-    
-    # Add current message
-    messages.append({"role": "user", "content": user_message})
-=======
     payload = await request.json()
     messages = _normalize_chat_messages(payload.get("messages", []))
->>>>>>> origin/master
 
-    # Define tools (same as before)
+    # Define tools
     tools = [
         {
             "type": "function",
@@ -1140,119 +1121,6 @@ async def chat_agent(request: Request):
         }
     ]
 
-<<<<<<< HEAD
-    try:
-        # System message setup
-        current_time_str = _utc_now().strftime("%A, %B %d, %Y at %H:%M UTC")
-        system_msg = {
-            "role": "system", 
-            "content": f"""You are an empathetic, supportive, and active-listening AI companion. Your primary goal is to help the user navigate their emotions, reduce stress, and improve their overall well-being. 
-
-Today is {current_time_str}.
-
-You have access to the user's past conversational history. Always use this context to provide personalized, consistent support.
-
-CRITICAL RULES AND CONSTRAINTS:
-1. NO DIAGNOSES: You are a supportive guide, not a licensed medical professional. Never diagnose the user with any medical or psychiatric condition (e.g., do not say "You have depression"). 
-2. VOICE-OPTIMIZED OUTPUT: Your responses will be spoken aloud by a Text-to-Speech engine. You MUST write in natural, spoken English. Do not use bullet points, numbered lists, emojis, asterisks, bolding, or markdown. Keep your sentences relatively short and conversational.
-3. CBT FRAMEWORK: When the user expresses negative emotions or stress, gently guide them using Cognitive Behavioral Therapy (CBT) techniques. Help them identify negative thought patterns (cognitive distortions) and guide them to reframe those thoughts into more balanced, realistic perspectives. Ask guiding questions rather than just giving advice.
-4. EARLY WARNING SYSTEM: If the user consistently expresses thoughts of severe hopelessness, extreme burnout, or danger to themselves, you must gently but clearly advise them to seek support from friends, family, or a professional human counselor. 
-5. CONVERSATIONAL CADENCE: Do not monologue. Respond with one or two concise thoughts, followed by a gentle, open-ended question to keep the user talking. Actively validate their feelings before offering a new perspective.
-
-Current Goal: Listen empathetically, validate the user's current emotional state, gracefully reference their past context if relevant, and gently guide them toward a positive, reframed mindset."""
-        }
-        
-        call_messages = [system_msg] + messages
-
-        response = groq_client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=call_messages,
-            tools=tools,
-            tool_choice="auto",
-            max_tokens=4096
-        )
-
-        response_message = response.choices[0].message
-        assistant_content = ""
-
-        # Check if the model wants to call a function
-        tool_calls = response_message.tool_calls
-        if tool_calls:
-            call_messages.append({
-                "role": "assistant",
-                "content": response_message.content,
-                "tool_calls": [t.model_dump() for t in tool_calls]
-            })
-
-            journals, _, tasks, _, _, _, _ = _get_collections()
-
-            for tool_call in tool_calls:
-                function_name = tool_call.function.name
-                function_args = json.loads(tool_call.function.arguments)
-                tool_response = ""
-
-                if function_name == "get_tasks":
-                    docs = list(tasks.find({"userId": uid}).sort("date", DESCENDING).limit(10))
-                    tool_response = json.dumps([_serialize_doc(d) for d in docs])
-                elif function_name == "create_task":
-                    doc = {
-                        "userId": str(uid or ""),
-                        "userEmail": str(email or ""),
-                        "title": function_args.get("title", "Untitled Task"),
-                        "description": function_args.get("description", ""),
-                        "status": function_args.get("status", "pending"),
-                        "date": _utc_now()
-                    }
-                    inserted = tasks.insert_one(doc)
-                    tool_response = json.dumps({"status": "success", "taskId": str(inserted.inserted_id)})
-                elif function_name == "update_task":
-                    try:
-                        oid = _parse_object_id(function_args.get("task_id"))
-                        tasks.update_one({"_id": oid, "userId": uid}, {"$set": {"status": function_args.get("status")}})
-                        tool_response = json.dumps({"status": "success"})
-                    except:
-                        tool_response = json.dumps({"status": "error", "message": "Invalid task ID"})
-                elif function_name == "get_journals":
-                    docs = list(journals.find({"userId": uid}).sort("date", DESCENDING).limit(5))
-                    tool_response = json.dumps([_serialize_doc(d) for d in docs])
-                else:
-                    tool_response = json.dumps({"error": "Unknown function"})
-
-                call_messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "name": function_name,
-                    "content": tool_response
-                })
-
-            second_response = groq_client.chat.completions.create(
-                model="llama-3.1-8b-instant",
-                messages=call_messages,
-                max_tokens=4096
-            )
-            assistant_content = second_response.choices[0].message.content
-        else:
-            assistant_content = response_message.content
-        
-        # Save Q&A as a single entry
-        try:
-            avatar_col.insert_one({
-                "userId": uid,
-                "userEmail": email,
-                "user_query": user_message,
-                "assistant_response": assistant_content,
-                "date": _utc_now()
-            })
-        except:
-            pass
-
-        return {"role": "assistant", "content": assistant_content}
-
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return JSONResponse(status_code=500, content={"error": "Chat completion failed"})
-=======
     try:
         # System message setup
         system_msg = {
@@ -1287,7 +1155,7 @@ Current Goal: Listen empathetically, validate the user's current emotional state
                     "tool_calls": [t.model_dump() for t in tool_calls]
                 })
 
-                journals, _, tasks, _, _, _, _, _, _ = _get_collections()
+                journals, _, tasks, _, _, _, _, _, _, _ = _get_collections()
 
                 for tool_call in tool_calls:
                     function_name = tool_call.function.name
@@ -1377,7 +1245,7 @@ async def save_chat_conversation(request: Request):
     context_payload = payload.get("context")
     context = context_payload if isinstance(context_payload, dict) else {}
 
-    _, _, _, _, _, chat_conversations, _, _, _ = _get_collections()
+    _, _, _, _, _, chat_conversations, _, _, _, _ = _get_collections()
 
     conversation_doc = {
         "userId": str(uid or ""),
@@ -1420,7 +1288,7 @@ async def list_chat_conversations(
 ):
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
-    _, _, _, _, _, chat_conversations, _, _, _ = _get_collections()
+    _, _, _, _, _, chat_conversations, _, _, _, _ = _get_collections()
     docs = list(chat_conversations.find({"userId": uid}).sort("updatedAt", DESCENDING).limit(limit))
     return [_serialize_conversation_summary(doc) for doc in docs]
 
@@ -1428,7 +1296,7 @@ async def list_chat_conversations(
 async def get_chat_conversation(conversation_id: str, request: Request):
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
-    _, _, _, _, _, chat_conversations, _, _, _ = _get_collections()
+    _, _, _, _, _, chat_conversations, _, _, _, _ = _get_collections()
     try:
         oid = _parse_object_id(conversation_id)
     except ValueError:
@@ -1443,7 +1311,7 @@ async def get_chat_conversation(conversation_id: str, request: Request):
 async def update_chat_conversation(conversation_id: str, request: Request):
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
-    _, _, _, _, _, chat_conversations, _, _, _ = _get_collections()
+    _, _, _, _, _, chat_conversations, _, _, _, _ = _get_collections()
     try:
         oid = _parse_object_id(conversation_id)
     except ValueError:
@@ -1470,7 +1338,7 @@ async def update_chat_conversation(conversation_id: str, request: Request):
 async def delete_chat_conversation(conversation_id: str, request: Request):
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
-    _, _, _, _, _, chat_conversations, _, _, _ = _get_collections()
+    _, _, _, _, _, chat_conversations, _, _, _, _ = _get_collections()
     try:
         oid = _parse_object_id(conversation_id)
     except ValueError:
@@ -1480,7 +1348,72 @@ async def delete_chat_conversation(conversation_id: str, request: Request):
     if result.deleted_count == 0:
         return JSONResponse(status_code=404, content={"error": "Conversation not found"})
     return {"message": "Conversation deleted successfully"}
->>>>>>> origin/master
+
+@app.post("/api/avatar/chat")
+async def avatar_chat_agent(request: Request):
+    """
+    AI Chat Agent specifically for the Avatar persona.
+    """
+    if not groq_client:
+        return JSONResponse(status_code=500, content={"error": "Groq client not configured"})
+
+    auth_info = await _require_auth(request)
+    uid = auth_info.get("uid")
+    email = auth_info.get("email")
+    
+    payload = await request.json()
+    user_message = payload.get("message", "")
+    
+    _, _, _, _, _, _, _, _, _, avatar_col = _get_collections()
+    history_cursor = avatar_col.find({"userId": uid}).sort("date", DESCENDING).limit(20)
+    history = list(history_cursor)
+    history.reverse()
+    
+    messages = []
+    for h in history:
+        messages.append({"role": "user", "content": h.get("user_query", "")})
+        messages.append({"role": "assistant", "content": h.get("assistant_response", "")})
+    messages.append({"role": "user", "content": user_message})
+
+    # Tool definitions (simplified for now to match prompt requirements)
+    try:
+        current_time_str = _utc_now().strftime("%A, %B %d, %Y at %H:%M UTC")
+        system_msg = {
+            "role": "system", 
+            "content": f"""You are an empathetic, supportive, and active-listening AI companion. Your primary goal is to help the user navigate their emotions, reduce stress, and improve their overall well-being. 
+
+Today is {current_time_str}.
+
+You have access to the user's past conversational history. Always use this context to provide personalized, consistent support.
+
+CRITICAL RULES AND CONSTRAINTS:
+1. NO DIAGNOSES: You are a supportive guide, not a licensed medical professional. Never diagnose the user with any medical or psychiatric condition (e.g., do not say "You have depression"). 
+2. VOICE-OPTIMIZED OUTPUT: Your responses will be spoken aloud by a Text-to-Speech engine. You MUST write in natural, spoken English. Do not use bullet points, numbered lists, emojis, asterisks, bolding, or markdown. Keep your sentences relatively short and conversational.
+3. CBT FRAMEWORK: When the user expresses negative emotions or stress, gently guide them using Cognitive Behavioral Therapy (CBT) techniques. Help them identify negative thought patterns (cognitive distortions) and guide them to reframe those thoughts into more balanced, realistic perspectives. Ask guiding questions rather than just giving advice.
+4. EARLY WARNING SYSTEM: If the user consistently expresses thoughts of severe hopelessness, extreme burnout, or danger to themselves, you must gently but clearly advise them to seek support from friends, family, or a professional human counselor. 
+5. CONVERSATIONAL CADENCE: Do not monologue. Respond with one or two concise thoughts, followed by a gentle, open-ended question to keep the user talking. Actively validate their feelings before offering a new perspective.
+
+Current Goal: Listen empathetically, validate the user's current emotional state, gracefully reference their past context if relevant, and gently guide them toward a positive, reframed mindset."""
+        }
+        
+        call_messages = [system_msg] + messages
+        response = groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=call_messages,
+            max_tokens=4096
+        )
+        assistant_content = response.choices[0].message.content
+        
+        avatar_col.insert_one({
+            "userId": uid,
+            "userEmail": email,
+            "user_query": user_message,
+            "assistant_response": assistant_content,
+            "date": _utc_now()
+        })
+        return {"role": "assistant", "content": assistant_content}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": "Avatar chat failed"})
 
 
 @app.get("/api/avatar/history")
@@ -1488,7 +1421,7 @@ async def get_avatar_history(request: Request):
     """Fetch recent conversation history (Q&A pairs) for the user."""
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
-    _, _, _, _, _, _, avatar_col = _get_collections()
+    _, _, _, _, _, _, _, _, _, avatar_col = _get_collections()
     
     history_cursor = avatar_col.find({"userId": uid}).sort("date", DESCENDING).limit(50)
     history = list(history_cursor)
@@ -1558,7 +1491,7 @@ async def analyze_voice(
         user_context = await _get_user_context(uid)
 
         # Get recent conversation history for context
-        _, _, _, _, _, _, avatar_col = _get_collections()
+        _, _, _, _, _, _, _, _, _, avatar_col = _get_collections()
         history_cursor = avatar_col.find({"userId": uid}).sort("date", DESCENDING).limit(20)
         history = list(history_cursor)
         history.reverse() # Oldest first for LLM
@@ -1612,7 +1545,6 @@ The 'emotion' field should be a single word (e.g., happy, joyful, sad, anxious, 
 
         # Save Q&A as a single entry
         try:
-<<<<<<< HEAD
             suggestions_text = result.get("suggestions", "")
             if isinstance(suggestions_text, list):
                 suggestions_text = ". ".join(suggestions_text)
@@ -1626,10 +1558,7 @@ The 'emotion' field should be a single word (e.g., happy, joyful, sad, anxious, 
             })
 
             # Also save to voice_analyses for historical tracking if needed
-            _, _, _, _, voice_analyses_col, _, _ = _get_collections()
-=======
-            _, _, _, _, voice_analyses_col, _, _, _, _ = _get_collections()
->>>>>>> origin/master
+            _, _, _, _, voice_analyses_col, _, _, _, _, _ = _get_collections()
             voice_doc = {
                 "userId": str(uid or ""),
                 "userEmail": str(email or ""),
@@ -1794,7 +1723,7 @@ async def update_user_profile(request: Request):
     
     try:
         payload = await request.json()
-        _, _, _, users_col, _, _, _, _, _ = _get_collections()
+        _, _, _, users_col, _, _, _, _, _, _ = _get_collections()
         
         profile_data = {
             "userId": str(uid or ""),
@@ -1820,7 +1749,7 @@ async def update_user_profile(request: Request):
 async def _get_user_context(user_id: str) -> dict:
     """Get comprehensive user context for AI analysis."""
     try:
-        journals, _, tasks, users_col, voice_analyses_col, _, _, _, _ = _get_collections()
+        journals, _, tasks, users_col, voice_analyses_col, _, _, _, _, _ = _get_collections()
 
         # Get recent journals
         recent_journals = list(journals.find(
