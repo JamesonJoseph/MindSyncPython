@@ -43,6 +43,14 @@ GEMINI_API_KEY = (
     or os.getenv("EXPO_PUBLIC_GEMINI_API_KEY", "").strip()
 )
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash").strip()
+GEMINI_FALLBACK_MODELS = [
+    model.strip()
+    for model in os.getenv(
+        "GEMINI_FALLBACK_MODELS",
+        "gemini-1.5-flash,gemini-1.5-flash-8b"
+    ).split(",")
+    if model.strip()
+]
  
 PORT = int(os.getenv("PORT", "5000"))
 DB_CONNECT_TIMEOUT_MS = int(os.getenv("DB_CONNECT_TIMEOUT_MS", "8000"))
@@ -60,8 +68,10 @@ _mongo_client: MongoClient | None = None
 _gemini_http_client: httpx.AsyncClient | None = None
 _journal_analysis_cache: dict[str, tuple[float, str]] = {}
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
-EMOTION_LABELS = {"happy", "sad", "angry", "surprise", "fear", "disgust", "neutral"}
+EMOTION_LABELS = {"happy", "sad", "angry", "surprise", "neutral"}
 UPLOADS_DIR = Path(__file__).resolve().with_name("uploads")
+EMOTION_DEBUG_LOG = Path(__file__).resolve().with_name("emotion-debug.log")
+VOICE_DEBUG_LOG = Path(__file__).resolve().with_name("voice-debug.log")
 
 # Initialize Firebase Admin SDK (for verifying ID tokens)
 FIREBASE_ENABLED = False
@@ -465,6 +475,58 @@ def _default_emotion_payload(details: str = "No clear face detected.") -> dict:
     return {"emotion": "neutral", "confidence": 0, "details": details}
 
 
+def _log_emotion_debug(message: str) -> None:
+    try:
+        timestamp = datetime.now(timezone.utc).isoformat()
+        EMOTION_DEBUG_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with EMOTION_DEBUG_LOG.open("a", encoding="utf-8") as handle:
+            handle.write(f"{timestamp} {message}\n")
+    except Exception:
+        pass
+
+
+def _log_voice_debug(message: str) -> None:
+    try:
+        timestamp = datetime.now(timezone.utc).isoformat()
+        VOICE_DEBUG_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with VOICE_DEBUG_LOG.open("a", encoding="utf-8") as handle:
+            handle.write(f"{timestamp} {message}\n")
+    except Exception:
+        pass
+
+
+def _normalize_emotion_label(raw_value: str) -> str:
+    value = str(raw_value or "").strip().lower()
+    if not value:
+        return "neutral"
+
+    if value in EMOTION_LABELS:
+        return value
+
+    synonym_map = {
+        "joy": "happy",
+        "joyful": "happy",
+        "happiness": "happy",
+        "content": "happy",
+        "calm": "neutral",
+        "relaxed": "neutral",
+        "okay": "neutral",
+        "ok": "neutral",
+        "anxious": "surprise",
+        "anxiety": "surprise",
+        "scared": "surprise",
+        "afraid": "surprise",
+        "frustrated": "angry",
+        "mad": "angry",
+        "upset": "sad",
+        "down": "sad",
+        "confused": "surprise",
+        "shocked": "surprise",
+        "grossed_out": "angry",
+    }
+    return synonym_map.get(value, "neutral")
+
+
 def _build_local_journal_analysis(content: str) -> str:
     text = str(content or "").strip()
     if not text:
@@ -518,11 +580,14 @@ async def _analyze_with_gemini(base64_image: str, mime_type: str) -> dict:
     if not GEMINI_API_KEY:
         raise RuntimeError("Gemini API key is missing")
 
-    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
     prompt = (
-        "Analyze the face in this image for micro-expressions. Return strictly valid JSON with keys: emotion, confidence, details. "
-        "The emotion must be exactly one of: happy, sad, angry, surprise, fear, disgust, neutral. "
-        "Confidence is 0-100. Details should be a short 1-sentence analysis of the subtle facial cues. If you detect conflicting micro-expressions (like a fake smile), note it in the details.(make sure to do an  extra  bit of  thinking as the  faces are indian so its hard to read em)"
+        "Analyze the dominant visible facial expression in this selfie. "
+        "Do not default to neutral unless the expression is genuinely unclear. "
+        "Return strictly valid JSON with keys: emotion, confidence, details. "
+        "The emotion must be exactly one of: happy, sad, angry, surprise, neutral. "
+        "Confidence is 0-100. "
+        "Details should be a short 1-sentence explanation based on visible cues like smile, eyebrows, eyes, jaw tension, or frown. "
+        "If the face is blurry, obscured, or too small, then use neutral and say why."
     )
     
     payload = {
@@ -531,20 +596,92 @@ async def _analyze_with_gemini(base64_image: str, mime_type: str) -> dict:
     }
 
     client = _get_gemini_http_client()
-    response = await client.post(endpoint, json=payload, headers={"Content-Type": "application/json"})
-    response.raise_for_status()
-    
-    decoded = response.json()
+    candidate_models: list[str] = []
+    for model in [GEMINI_MODEL, *GEMINI_FALLBACK_MODELS]:
+        if model not in candidate_models:
+            candidate_models.append(model)
+
+    last_error: Exception | None = None
+
+    for model_name in candidate_models:
+        endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+        _log_emotion_debug(f"[gemini] trying model: {model_name}")
+
+        response = await client.post(endpoint, json=payload, headers={"Content-Type": "application/json"})
+        if response.status_code >= 400:
+            print("[gemini] non-success status:", response.status_code)
+            _log_emotion_debug(f"[gemini] non-success status model={model_name}: {response.status_code}")
+            try:
+                print("[gemini] error body:", response.text[:2000])
+                _log_emotion_debug(f"[gemini] error body model={model_name}: {response.text[:2000]}")
+            except Exception:
+                pass
+            try:
+                response.raise_for_status()
+            except Exception as exc:
+                last_error = exc
+                continue
+
+        decoded = response.json()
+        try:
+            _log_emotion_debug(f"[gemini] response model={model_name}: {json.dumps(decoded)[:2000]}")
+        except Exception:
+            _log_emotion_debug(f"[gemini] response model={model_name} could not be serialized")
+
+        try:
+            text = decoded["candidates"][0]["content"]["parts"][0]["text"]
+            parsed = json.loads(text)
+            _log_emotion_debug(f"[gemini] parsed text model={model_name}: {text[:1000]}")
+            return {
+                "emotion": _normalize_emotion_label(parsed.get("emotion", "neutral")),
+                "confidence": int(parsed.get("confidence", 0)),
+                "details": str(parsed.get("details", "")),
+                "model": model_name,
+            }
+        except (KeyError, json.JSONDecodeError, IndexError) as exc:
+            last_error = exc
+            try:
+                print("[gemini] unexpected response payload:", json.dumps(decoded)[:2000])
+                _log_emotion_debug(f"[gemini] unexpected response payload model={model_name}: {json.dumps(decoded)[:2000]}")
+            except Exception:
+                print("[gemini] unexpected response payload could not be serialized")
+                _log_emotion_debug(f"[gemini] unexpected response payload model={model_name} could not be serialized")
+
+    if last_error:
+        raise last_error
+    return _default_emotion_payload("Failed to parse Gemini output.")
+
+
+async def _safe_analyze_emotion(base64_image: str, mime_type: str) -> dict:
     try:
-        text = decoded["candidates"][0]["content"]["parts"][0]["text"]
-        parsed = json.loads(text)
-        return {
-            "emotion": str(parsed.get("emotion", "neutral")).lower(),
-            "confidence": int(parsed.get("confidence", 0)),
-            "details": str(parsed.get("details", ""))
-        }
-    except (KeyError, json.JSONDecodeError, IndexError):
-        return _default_emotion_payload("Failed to parse Gemini output.")
+        result = await asyncio.wait_for(
+            _analyze_with_gemini(base64_image, mime_type),
+            timeout=12.0,
+        )
+    except Exception as exc:
+        print(f"[emotion] gemini fallback triggered: {type(exc).__name__}: {exc}")
+        _log_emotion_debug(f"[emotion] gemini fallback triggered: {type(exc).__name__}: {exc}")
+        return _default_emotion_payload(
+            "Emotion detection is temporarily unavailable, so a neutral result was returned."
+        )
+
+    emotion = _normalize_emotion_label(result.get("emotion", "neutral"))
+
+    try:
+        confidence = int(result.get("confidence", 0) or 0)
+    except (TypeError, ValueError):
+        confidence = 0
+
+    details = str(result.get("details", "") or "").strip()
+    if not details:
+        details = "No clear face detected."
+
+    return {
+        "emotion": emotion,
+        "confidence": max(0, min(confidence, 100)),
+        "details": details,
+        "fallback": bool(result.get("fallback", False)),
+    }
 
 @app.on_event("shutdown")
 async def close_clients():
@@ -1015,10 +1152,16 @@ async def detect_emotion(
     email = auth_info.get("email")
     try:
         image_bytes = await image.read()
+        if not image_bytes:
+            return JSONResponse(status_code=400, content={"error": "Image is required"})
+
         base64_img = base64.b64encode(image_bytes).decode("utf-8")
         mime_type = image.content_type or "image/jpeg"
-        
-        emotion_data = await _analyze_with_gemini(base64_img, mime_type)
+
+        emotion_data = await _safe_analyze_emotion(base64_img, mime_type)
+        _log_emotion_debug(
+            f"[emotion] final result emotion={emotion_data.get('emotion')} confidence={emotion_data.get('confidence')} details={emotion_data.get('details')}"
+        )
 
         emotion_doc = {
             "userId": str(uid or ""),
@@ -1041,7 +1184,7 @@ async def detect_emotion(
         print("\n=== GEMINI API CRASH ===")
         traceback.print_exc()
         print("========================\n")
-        return JSONResponse(status_code=500, content={"error": "Detection failed"})
+        return _default_emotion_payload("Emotion detection failed, so a neutral result was returned.")
 
 # ==================== CHAT AGENT ====================
 
@@ -1454,6 +1597,23 @@ async def analyze_voice(
     
     try:
         audio_bytes = await audio.read()
+        _log_voice_debug(
+            f"[voice] upload filename={audio.filename} content_type={audio.content_type} size={len(audio_bytes)}"
+        )
+        if not audio_bytes:
+            return {
+                "transcript": "",
+                "emotion": "neutral",
+                "confidence": 0,
+                "suggestions": "I couldn't hear what you said. Could you try again?",
+                "earlyWarning": ""
+            }
+
+        if not ASSEMBLYAI_API_KEY:
+            return JSONResponse(
+                status_code=503,
+                content={"error": "Voice transcription is not configured on the server."}
+            )
 
         import assemblyai as aai
         import tempfile
@@ -1471,6 +1631,10 @@ async def analyze_voice(
             transcriber = aai.Transcriber()
             transcript = transcriber.transcribe(tmp_path, config=config)
             transcript_text = transcript.text if getattr(transcript, 'text', None) else ""
+            transcript_error = getattr(transcript, 'error', None)
+            _log_voice_debug(
+                f"[voice] transcript status={getattr(transcript, 'status', None)} error={getattr(transcript, 'error', None)} text={str(transcript_text)[:500]}"
+            )
         finally:
             try:
                 if tmp_path and os.path.exists(tmp_path):
@@ -1478,7 +1642,19 @@ async def analyze_voice(
             except Exception:
                 pass
 
+        if transcript_error:
+            lowered_error = str(transcript_error).lower()
+            if "too short" in lowered_error:
+                return {
+                    "transcript": "",
+                    "emotion": "neutral",
+                    "confidence": 0,
+                    "suggestions": "That recording was too short. Please speak for at least three seconds and then try again.",
+                    "earlyWarning": ""
+                }
+
         if not transcript_text:
+            _log_voice_debug("[voice] empty transcript returned")
             return {
                 "transcript": "",
                 "emotion": "neutral",
@@ -1487,12 +1663,9 @@ async def analyze_voice(
                 "earlyWarning": ""
             }
 
-        # Get user context for analysis
-        user_context = await _get_user_context(uid)
-
         # Get recent conversation history for context
         _, _, _, _, _, _, _, _, _, avatar_col = _get_collections()
-        history_cursor = avatar_col.find({"userId": uid}).sort("date", DESCENDING).limit(20)
+        history_cursor = avatar_col.find({"userId": uid}).sort("date", DESCENDING).limit(8)
         history = list(history_cursor)
         history.reverse() # Oldest first for LLM
 
@@ -1523,23 +1696,30 @@ The 'emotion' field should be a single word (e.g., happy, joyful, sad, anxious, 
 
         messages.append({"role": "user", "content": transcript_text})
 
-        # Analyze tone and emotion using Groq
-        chat_completion = groq_client.chat.completions.create(
-            messages=messages,
-            model="llama-3.1-8b-instant",
-            temperature=0.7,
-            max_tokens=800,
-            response_format={"type": "json_object"}
-        )
+        if groq_client:
+            chat_completion = groq_client.chat.completions.create(
+                messages=messages,
+                model="llama-3.1-8b-instant",
+                temperature=0.7,
+                max_tokens=300,
+                response_format={"type": "json_object"}
+            )
 
-        result_text = chat_completion.choices[0].message.content if chat_completion.choices else ""
-        try:
-            result = json.loads(result_text)
-        except json.JSONDecodeError:
+            result_text = chat_completion.choices[0].message.content if chat_completion.choices else ""
+            try:
+                result = json.loads(result_text)
+            except json.JSONDecodeError:
+                result = {
+                    "emotion": "neutral",
+                    "confidence": 50,
+                    "suggestions": result_text or "Thank you for sharing. I'm here to help.",
+                    "earlyWarning": ""
+                }
+        else:
             result = {
                 "emotion": "neutral",
                 "confidence": 50,
-                "suggestions": result_text or "Thank you for sharing. I'm here to help.",
+                "suggestions": "I heard you. Voice guidance is temporarily limited right now, but you can try again in a moment.",
                 "earlyWarning": ""
             }
 
@@ -1583,6 +1763,7 @@ The 'emotion' field should be a single word (e.g., happy, joyful, sad, anxious, 
     except Exception as e:
         import traceback
         traceback.print_exc()
+        _log_voice_debug(f"[voice] exception: {type(e).__name__}: {e}")
         return JSONResponse(status_code=500, content={"error": f"Voice analysis failed: {str(e)}"})
 
 

@@ -12,7 +12,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { auth } from '../firebaseConfig';
 import { CameraView, useCameraPermissions } from 'expo-camera';
-import { getApiBaseUrl } from '../utils/api';
+import { getApiBaseUrl, authFetch, parseApiResponse } from '../utils/api';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const EMOTION_ANALYZED_KEY = 'mindSync_lastEmotionAnalysis';
@@ -87,13 +87,14 @@ export default function HomeScreen() {
         formData.append('userEmail', userEmail);
 
         const apiUrl = getApiBaseUrl();
-        const response = await fetch(`${apiUrl}/api/emotion`, {
+        const response = await authFetch(`${apiUrl}/api/emotion`, {
           method: 'POST',
           body: formData,
+          timeoutMs: 30000,
         });
 
         if (response.ok) {
-          const data = await response.json();
+          const data = await parseApiResponse<any>(response);
           const emotion = data.emotion;
           const details = data.details || "I've analyzed your subtle facial cues.";
           

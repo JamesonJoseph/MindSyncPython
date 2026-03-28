@@ -11,7 +11,7 @@ import {
   Modal,
   FlatList,
 } from 'react-native';
-import { Ionicons, MaterialCommunityIcons, FontAwesome5 } from '@expo/vector-icons';
+import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { useVideoPlayer, VideoView } from 'expo-video';
@@ -19,13 +19,15 @@ import Animated, { useAnimatedStyle, withTiming, useSharedValue, Easing } from '
 import * as KeepAwake from 'expo-keep-awake';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 
-import { useAudioRecorder, RecordingPresets, useAudioRecorderState, requestRecordingPermissionsAsync, setAudioModeAsync } from 'expo-audio';
+import { useAudioRecorder, useAudioRecorderState, requestRecordingPermissionsAsync, setAudioModeAsync, RecordingPresets } from 'expo-audio';
 import * as Speech from 'expo-speech';
 import { auth } from '../firebaseConfig';
-import { getApiBaseUrl } from '../utils/api';
+import { parseApiResponse } from '../utils/api';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const AVATAR_SIZE = SCREEN_WIDTH - 40;
+const MIN_RECORDING_MS = 5000;
+const VOICE_RECORDING_OPTIONS = RecordingPresets.HIGH_QUALITY;
 
 type AvatarState = 'idle' | 'listening' | 'thinking' | 'speaking_happy' | 'speaking_compassionate';
 
@@ -64,7 +66,6 @@ export default function AvatarScreen() {
   const [transcript, setTranscript] = useState('');
   const [aiResponse, setAiResponse] = useState<VoiceAnalysis | null>(null);
   const [showResponse, setShowResponse] = useState(false);
-  const [micPermissionGranted, setMicPermissionGranted] = useState(false);
   
   const [history, setHistory] = useState<AvatarConversation[]>([]);
   const [showHistoryModal, setShowHistoryModal] = useState(false);
@@ -107,9 +108,6 @@ export default function AvatarScreen() {
     speaking_compassionate: compassionatePlayer,
   }), [idlePlayer, listeningPlayer, thinkingPlayer, happyPlayer, compassionatePlayer]);
 
-  const currentPlayer = players[avatarState];
-
-  // REALISM: Attentive Zoom & Smooth Blink Opacity
   const videoOpacity = useSharedValue(0);
   const avatarScale = useSharedValue(1);
 
@@ -171,24 +169,39 @@ export default function AvatarScreen() {
   }, [players]);
 
   // --- AUDIO LOGIC ---
-  const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const audioRecorder = useAudioRecorder(VOICE_RECORDING_OPTIONS);
   const recorderState = useAudioRecorderState(audioRecorder);
   const userId = auth.currentUser?.uid || '';
   const userEmail = auth.currentUser?.email || '';
 
+  const resetAudioSessionForRecording = async () => {
+    Speech.stop();
+    await setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  };
+
   const checkMicrophonePermission = async () => {
     try {
       const { status } = await requestRecordingPermissionsAsync();
-      setMicPermissionGranted(status === 'granted');
       return status === 'granted';
-    } catch (error) { return false; }
+    } catch {
+      return false;
+    }
   };
 
   const handleStartListening = async () => {
-    const granted = await checkMicrophonePermission();
-    if (!granted) return;
+    if (isProcessing || recorderState?.isRecording) {
+      return;
+    }
 
-    Speech.stop();
+    const granted = await checkMicrophonePermission();
+    if (!granted) {
+      Alert.alert('Permission Required', 'Microphone access is needed to use the AI avatar.');
+      return;
+    }
+
     setIsListening(true);
     setAvatarState('listening');
     setTranscript('');
@@ -197,29 +210,68 @@ export default function AvatarScreen() {
     responseSpokenRef.current = null;
 
     try {
-      await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
+      await resetAudioSessionForRecording();
       await audioRecorder.prepareToRecordAsync();
       audioRecorder.record();
     } catch (error) {
+      console.warn('Avatar recording failed to start', error);
+      try {
+        await setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true });
+      } catch {}
       setIsListening(false);
       setAvatarState('idle');
+      Alert.alert(
+        'Recording Error',
+        error instanceof Error && error.message
+          ? `Could not start microphone recording. ${error.message}`
+          : 'Could not start microphone recording.'
+      );
     }
   };
 
   const handleStopListening = async () => {
     if (!audioRecorder || !recorderState?.isRecording) return;
+    const durationBeforeStop = recorderState.durationMillis || Math.round(audioRecorder.currentTime * 1000) || 0;
+    if (durationBeforeStop < MIN_RECORDING_MS) {
+      Alert.alert('Speak Longer', 'Keep speaking for at least five seconds before stopping.');
+      return;
+    }
     setIsListening(false);
     setIsProcessing(true);
     setAvatarState('thinking');
     
     try {
       await audioRecorder.stop();
+      await new Promise((resolve) => setTimeout(resolve, 150));
       const uri = audioRecorder.uri;
-      await setAudioModeAsync({ allowsRecording: false });
-      if (uri) await processVoiceRecording(uri);
-      else setAvatarState('idle');
-    } catch (error) { setAvatarState('idle'); }
-    finally { setIsProcessing(false); }
+      await setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true });
+      if (!uri) {
+        Alert.alert('Recording Error', 'No audio was captured. Please try again.');
+        setAvatarState('idle');
+        return;
+      }
+
+      const recordedDurationMs = Math.max(
+        durationBeforeStop,
+        Math.round(audioRecorder.currentTime * 1000) || 0
+      );
+      if (recordedDurationMs < MIN_RECORDING_MS) {
+        Alert.alert('Speak Longer', 'The recording was too short. Try speaking for at least five seconds.');
+        setAvatarState('idle');
+        return;
+      }
+
+      await processVoiceRecording(uri);
+    } catch (error) {
+      console.warn('Avatar recording failed to stop', error);
+      try {
+        await setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true });
+      } catch {}
+      setAvatarState('idle');
+      Alert.alert('Recording Error', 'Could not finish microphone recording.');
+    } finally {
+      setIsProcessing(false);
+    }
   };
 
   const processVoiceRecording = async (audioUri: string) => {
@@ -227,7 +279,11 @@ export default function AvatarScreen() {
     setAvatarState('thinking');
     try {
       const formData = new FormData();
-      formData.append('audio', { uri: audioUri, name: 'recording.m4a', type: 'audio/m4a' } as any);
+      formData.append('audio', {
+        uri: audioUri,
+        name: 'journal-recording.m4a',
+        type: 'audio/m4a',
+      } as any);
       // uid and email are already handled by authFetch's token verification on the backend, 
       // but we keep them for extra context if needed by the backend logic.
       formData.append('userId', userId || 'anonymous');
@@ -238,10 +294,11 @@ export default function AvatarScreen() {
         method: 'POST',
         headers: { 'Accept': 'application/json' },
         body: formData,
+        timeoutMs: 90000,
       });
 
       if (response.ok) {
-        const data: VoiceAnalysis = await response.json();
+        const data = await parseApiResponse<VoiceAnalysis>(response);
         setTranscript(data.transcript || 'No speech detected');
         setAiResponse(data);
         setShowResponse(true);
@@ -253,8 +310,23 @@ export default function AvatarScreen() {
           setAvatarState(nextState as AvatarState);
         } else setAvatarState('idle');
         fetchHistory();
-      } else setAvatarState('idle');
-    } catch (error) { setAvatarState('idle'); }
+      } else {
+        const data = await parseApiResponse<any>(response);
+        Alert.alert(
+          'Voice Error',
+          typeof data?.error === 'string' ? data.error : 'Could not process the recording.'
+        );
+        setAvatarState('idle');
+      }
+    } catch (error) {
+      Alert.alert(
+        'Voice Error',
+        error instanceof Error && /timed out|network request failed/i.test(error.message)
+          ? 'The voice request took too long. Try a shorter recording and speak clearly.'
+          : 'Could not process the recording.'
+      );
+      setAvatarState('idle');
+    }
     finally { setIsProcessing(false); }
   };
 
@@ -283,11 +355,7 @@ export default function AvatarScreen() {
         <Animated.View style={[styles.avatarContainer, containerAnimatedStyle]}>
           <View style={styles.videoBackground} />
           
-          <Animated.View style={[styles.videoLayer, { opacity: videoOpacity }]}>
-            {/* 
-                FORCED REMOUNT (key={avatarState}):
-                This is the most reliable way to ensure the video switches and plays correctly.
-            */}
+          <Animated.View style={[styles.videoLayer, videoAnimatedStyle]}>
             <VideoView 
               key={avatarState}
               player={players[avatarState]} 
@@ -316,16 +384,22 @@ export default function AvatarScreen() {
           >
             {isProcessing ? <ActivityIndicator size="large" color="#fff" /> : <Ionicons name={isListening ? 'stop' : 'mic'} size={32} color="#fff" />}
           </TouchableOpacity>
-          <Text style={styles.micHint}>{isListening ? 'Tap to stop' : 'Tap to speak to me'}</Text>
+          <Text style={styles.micHint}>
+            {isListening
+              ? recorderState.durationMillis < MIN_RECORDING_MS
+                ? `Keep speaking... ${Math.max(0, Math.ceil((MIN_RECORDING_MS - recorderState.durationMillis) / 1000))}s`
+                : 'Tap to stop'
+              : 'Tap to speak to me'}
+          </Text>
         </View>
 
         {transcript ? (
           <View style={styles.transcriptContainer}>
-            <Text style={styles.transcriptText}>"{transcript}"</Text>
+            <Text style={styles.transcriptText}>{transcript}</Text>
           </View>
         ) : (
           <View style={styles.placeholderBox}>
-            <Text style={styles.placeholderText}>"Talk to me, I'm listening..."</Text>
+            <Text style={styles.placeholderText}>Talk to me. I&apos;m listening...</Text>
           </View>
         )}
 

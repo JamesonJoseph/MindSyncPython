@@ -50,6 +50,21 @@ export function getTodayIST(): string {
   return `${year}-${month}-${day}`;
 }
 
+export function getISTDateString(date: Date | string): string {
+  const value = typeof date === 'string' ? new Date(date) : date;
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(value);
+
+  const year = parts.find((part) => part.type === 'year')?.value ?? '1970';
+  const month = parts.find((part) => part.type === 'month')?.value ?? '01';
+  const day = parts.find((part) => part.type === 'day')?.value ?? '01';
+  return `${year}-${month}-${day}`;
+}
+
 /**
  * Get current time in IST (as HH:MM string)
  */

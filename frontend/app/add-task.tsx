@@ -16,7 +16,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { auth } from '../firebaseConfig';
 import { getApiBaseUrl } from '../utils/api';
-import { toISTISOString, getISTNow } from '../utils/timezone';
+import { toISTISOString, getISTNow, getISTDateString } from '../utils/timezone';
 import { scheduleTaskReminder, requestNotificationPermissions } from '../utils/notifications';
 
 type Priority = 'high' | 'medium' | 'low';
@@ -125,7 +125,7 @@ export default function AddTaskScreen() {
     setSaving(true);
 
     // Build date string in IST format
-    const dateStr = selectedDate.toISOString().split('T')[0];
+    const dateStr = getISTDateString(selectedDate);
     const isoDate = selectedTime ? toISTISOString(dateStr, selectedTime) : toISTISOString(dateStr);
 
     const taskData = {

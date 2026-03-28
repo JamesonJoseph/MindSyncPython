@@ -1,7 +1,12 @@
 import Constants from 'expo-constants';
 import { auth } from '../firebaseConfig';
 
-const API_PORT = '5001';
+const API_PORT = '5000';
+const DEFAULT_REQUEST_TIMEOUT_MS = 8000;
+
+interface AuthFetchInit extends RequestInit {
+  timeoutMs?: number;
+}
 
 function normalizeBaseUrl(value: string | null | undefined): string | null {
   const trimmed = String(value || '').trim();
@@ -63,21 +68,18 @@ function buildRetryUrls(input: string): string[] {
     return baseCandidates.map((baseUrl) => buildUrl(baseUrl, input));
   }
 
-  try {
-    const parsed = new URL(input);
-    const pathWithQuery = `${parsed.pathname}${parsed.search}`;
-    return [input, ...baseCandidates.map((baseUrl) => `${baseUrl}${pathWithQuery}`)];
-  } catch {
-    return [input];
-  }
+  return [input];
 }
 
 function isNetworkError(error: unknown): boolean {
-  return error instanceof Error && /network request failed|network request timed out|failed to fetch/i.test(error.message);
+  return error instanceof Error && (
+    error.name === 'AbortError' ||
+    /network request failed|network request timed out|failed to fetch/i.test(error.message)
+  );
 }
 
 // Helper that attaches Firebase ID token (if present) and default headers
-export async function authFetch(input: string, init: RequestInit = {}) {
+export async function authFetch(input: string, init: AuthFetchInit = {}) {
   const headers: Record<string, string> = {
     ...((init.headers as Record<string, string>) || {}),
   };
@@ -103,13 +105,22 @@ export async function authFetch(input: string, init: RequestInit = {}) {
     ...init,
     headers,
   };
+  const timeoutMs =
+    typeof init.timeoutMs === 'number' && Number.isFinite(init.timeoutMs)
+      ? Math.max(1000, init.timeoutMs)
+      : DEFAULT_REQUEST_TIMEOUT_MS;
 
   const retryUrls = [...new Set(buildRetryUrls(input))];
   let lastError: unknown = null;
 
   for (const url of retryUrls) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await fetch(url, opts);
+      const response = await fetch(url, {
+        ...opts,
+        signal: opts.signal ?? controller.signal,
+      });
       const contentType = response.headers.get('content-type') || '';
 
       // Retry alternate base URLs when the first endpoint returns a non-JSON
@@ -125,6 +136,8 @@ export async function authFetch(input: string, init: RequestInit = {}) {
       if (!isNetworkError(error)) {
         throw error;
       }
+    } finally {
+      clearTimeout(timeoutId);
     }
   }
 

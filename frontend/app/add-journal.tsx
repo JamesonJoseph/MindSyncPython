@@ -16,13 +16,16 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useRouter, useLocalSearchParams, Stack } from "expo-router";
 import {
   requestRecordingPermissionsAsync,
-  RecordingPresets,
   setAudioModeAsync,
   useAudioRecorder,
   useAudioRecorderState,
+  RecordingPresets,
 } from "expo-audio";
 import { auth } from "../firebaseConfig";
 import { getApiBaseUrl, parseApiResponse } from "../utils/api";
+
+const MIN_RECORDING_MS = 5000;
+const VOICE_RECORDING_OPTIONS = RecordingPresets.HIGH_QUALITY;
 
 export default function AddJournalScreen() {
   const insets = useSafeAreaInsets();
@@ -39,7 +42,7 @@ export default function AddJournalScreen() {
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [micPermissionGranted, setMicPermissionGranted] = useState(false);
 
-  const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const audioRecorder = useAudioRecorder(VOICE_RECORDING_OPTIONS);
   const recorderState = useAudioRecorderState(audioRecorder);
 
   const today = new Date();
@@ -91,6 +94,7 @@ export default function AddJournalScreen() {
           Accept: "application/json",
         },
         body: formData,
+        timeoutMs: 90000,
       });
 
       const data = await parseApiResponse<any>(response);
@@ -106,7 +110,11 @@ export default function AddJournalScreen() {
       appendTranscriptToJournal(String(data?.transcript || ""));
     } catch (error) {
       console.warn("Journal transcription failed", error);
-      Alert.alert("Network Error", "Could not reach the voice transcription service.");
+      const message =
+        error instanceof Error && /timed out|network request failed/i.test(error.message)
+          ? "The voice transcription request took too long. Please try a shorter recording or try again in a moment."
+          : "Could not reach the voice transcription service.";
+      Alert.alert("Network Error", message);
     } finally {
       setIsTranscribing(false);
     }
@@ -149,6 +157,7 @@ export default function AddJournalScreen() {
 
     try {
       await audioRecorder.stop();
+      await new Promise((resolve) => setTimeout(resolve, 450));
       await setAudioModeAsync({
         allowsRecording: false,
       });
@@ -157,6 +166,12 @@ export default function AddJournalScreen() {
       const audioUri = audioRecorder.uri;
       if (!audioUri) {
         Alert.alert("Recording Error", "No audio was captured. Please try again.");
+        return;
+      }
+
+      const recordedDurationMs = recorderState.durationMillis || Math.round(audioRecorder.currentTime * 1000) || 0;
+      if (recordedDurationMs < MIN_RECORDING_MS) {
+        Alert.alert("Speak Longer", "Please record for at least five seconds before sending.");
         return;
       }
 

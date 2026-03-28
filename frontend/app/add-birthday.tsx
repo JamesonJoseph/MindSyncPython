@@ -14,7 +14,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { auth } from '../firebaseConfig';
 import { getApiBaseUrl } from '../utils/api';
-import { toISTISOString, getISTNow } from '../utils/timezone';
+import { toISTISOString, getISTNow, getISTDateString } from '../utils/timezone';
 
 export default function AddBirthdayScreen() {
   const router = useRouter();
@@ -111,7 +111,7 @@ export default function AddBirthdayScreen() {
     }
 
     // Build date string in IST format
-    const dateStr = selectedDate.toISOString().split('T')[0];
+    const dateStr = getISTDateString(selectedDate);
     const isoDate = toISTISOString(dateStr);
 
     const birthdayData = {

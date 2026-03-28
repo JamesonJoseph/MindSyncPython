@@ -19,7 +19,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { auth } from '../firebaseConfig';
 import { getApiBaseUrl } from '../utils/api';
-import { fromISOToIST, toISTISOString } from '../utils/timezone';
+import { fromISOToIST, toISTISOString, getISTDateString } from '../utils/timezone';
 
 type Task = {
   _id: string;
@@ -494,7 +494,7 @@ export default function TasksScreen() {
 
   const handleSelectType = (type: 'event' | 'task' | 'birthday') => {
     setShowAddMenu(false);
-    const dateString = selectedDate.toISOString().split('T')[0];
+    const dateString = getISTDateString(selectedDate);
     
     if (type === 'task') {
       router.push(`/add-task?date=${dateString}`);
