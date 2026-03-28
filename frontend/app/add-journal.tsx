@@ -22,7 +22,7 @@ import {
   RecordingPresets,
 } from "expo-audio";
 import { auth } from "../firebaseConfig";
-import { getApiBaseUrl, parseApiResponse } from "../utils/api";
+import { parseApiResponse } from "../utils/api";
 
 const MIN_RECORDING_MS = 5000;
 const VOICE_RECORDING_OPTIONS = RecordingPresets.HIGH_QUALITY;
@@ -205,7 +205,6 @@ export default function AddJournalScreen() {
 
     setIsAnalyzing(true);
     try {
-      const apiUrl = getApiBaseUrl();
       const { authFetch } = await import('../utils/api');
 
       let response: Response | null = null;
@@ -214,10 +213,11 @@ export default function AddJournalScreen() {
 
       for (let attempt = 0; attempt < 2; attempt += 1) {
         try {
-          response = await authFetch(`${apiUrl}/api/analyze`, {
+          response = await authFetch("/api/analyze", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ content: content }),
+            timeoutMs: 20000,
           });
           data = await parseApiResponse<any>(response);
           lastError = null;

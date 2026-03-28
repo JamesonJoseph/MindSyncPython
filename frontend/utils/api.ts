@@ -2,7 +2,7 @@ import Constants from 'expo-constants';
 import { auth } from '../firebaseConfig';
 
 const API_PORT = '5000';
-const DEFAULT_REQUEST_TIMEOUT_MS = 8000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 15000;
 
 interface AuthFetchInit extends RequestInit {
   timeoutMs?: number;
@@ -38,8 +38,8 @@ function getExpoHostApiBaseUrl(): string | null {
 
 export function getApiBaseUrlCandidates(): string[] {
   const candidates = [
-    getExpoHostApiBaseUrl(),
     normalizeBaseUrl(process.env.EXPO_PUBLIC_API_URL),
+    getExpoHostApiBaseUrl(),
   ].filter((value): value is string => Boolean(value));
 
   return [...new Set(candidates)];
@@ -87,14 +87,15 @@ export async function authFetch(input: string, init: AuthFetchInit = {}) {
   try {
     const user = auth.currentUser;
     if (user) {
-      // Use the cached token first to avoid a network round-trip on every
-      // request. Firebase refreshes it only when required.
-      const token = await user.getIdToken(false);
-      if (token) headers['Authorization'] = `Bearer ${token}`;
       headers['X-User-Id'] = user.uid;
       if (user.email) {
         headers['X-User-Email'] = user.email;
       }
+
+      // Use the cached token first to avoid a network round-trip on every
+      // request. Firebase refreshes it only when required.
+      const token = await user.getIdToken(false);
+      if (token) headers['Authorization'] = `Bearer ${token}`;
     }
   } catch (e) {
     // ignore token errors; proceed without auth header

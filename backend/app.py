@@ -65,6 +65,7 @@ db_name_from_uri = urlparse(MONGO_URI).path.lstrip("/")
 db_name = os.getenv("MONGO_DB_NAME", "").strip() or db_name_from_uri or "mindsync"
 
 _mongo_client: MongoClient | None = None
+_mongo_error: str | None = None
 _gemini_http_client: httpx.AsyncClient | None = None
 _journal_analysis_cache: dict[str, tuple[float, str]] = {}
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
@@ -140,7 +141,13 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup_event():
-    await asyncio.to_thread(_ensure_indexes)
+    global _mongo_error
+    try:
+        await asyncio.to_thread(_ensure_indexes)
+        _mongo_error = None
+    except Exception as exc:
+        _mongo_error = str(exc)
+        print("[mongo] startup init failed:", exc)
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -225,8 +232,14 @@ def _build_journal_query(user_id: str, start_date: str | None = None, end_date: 
 
 def _get_mongo_client() -> MongoClient:
     global _mongo_client
+    global _mongo_error
     if _mongo_client is None:
-        _mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=DB_CONNECT_TIMEOUT_MS)
+        try:
+            _mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=DB_CONNECT_TIMEOUT_MS)
+            _mongo_error = None
+        except Exception as exc:
+            _mongo_error = str(exc)
+            raise
     return _mongo_client
 def _get_collections():
     database = _get_mongo_client()[db_name]
@@ -691,7 +704,11 @@ async def close_clients():
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok"}
+    return {
+        "status": "ok" if not _mongo_error else "degraded",
+        "mongo": "connected" if not _mongo_error else "unavailable",
+        "mongoError": _mongo_error,
+    }
 
 # ==================== JOURNALS ====================
 
