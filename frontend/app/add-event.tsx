@@ -16,7 +16,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { auth } from '../firebaseConfig';
 import { getApiBaseUrl } from '../utils/api';
-import { getTodayIST, toISTISOString, formatDateIST, getISTNow, getISTDateString } from '../utils/timezone';
+import { toISTISOString, getISTNow, getISTDateString } from '../utils/timezone';
 import { scheduleEventReminder, requestNotificationPermissions } from '../utils/notifications';
 
 const colors = ['#FF9500', '#FF6B6B', '#00E0C6', '#5856D6', '#34C759', '#007AFF', '#FF2D55', '#AF52DE'];

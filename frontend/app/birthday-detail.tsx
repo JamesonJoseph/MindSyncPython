@@ -22,9 +22,19 @@ export default function BirthdayDetailScreen() {
 
   const formatDate = (dateStr: string) => {
     if (!dateStr) return '';
-    const [month, day] = dateStr.split('-');
-    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    return `${monthNames[parseInt(month) - 1]} ${parseInt(day)}, ${new Date().getFullYear()}`;
+    try {
+      const d = new Date(dateStr);
+      if (isNaN(d.getTime())) {
+        const [month, day] = dateStr.split('-');
+        const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+        return `${monthNames[parseInt(month) - 1] || ''} ${parseInt(day) || ''}, ${new Date().getFullYear()}`;
+      }
+      const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      const istDate = new Date(d.getTime() + d.getTimezoneOffset() * 60000 + 5.5 * 60 * 60 * 1000);
+      return `${monthNames[istDate.getMonth()]} ${istDate.getDate()}, ${new Date().getFullYear()}`;
+    } catch {
+      return dateStr;
+    }
   };
 
   return (

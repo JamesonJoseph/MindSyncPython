@@ -9,8 +9,6 @@ import {
   TextInput,
   Switch,
   Alert,
-  Platform,
-  Dimensions,
   FlatList,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
@@ -50,16 +48,13 @@ const TYPE_ICONS = {
 export default function TaskManagerScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { width } = Dimensions.get('window');
   const userId = auth.currentUser?.uid || '';
 
   // State
   const [tasks, setTasks] = useState<TaskItem[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
   const [showAddMenu, setShowAddMenu] = useState(false);
   const [showFormModal, setShowFormModal] = useState(false);
   const [editingTask, setEditingTask] = useState<TaskItem | null>(null);
-  const [selectedType, setSelectedType] = useState<'event' | 'task' | 'birthday'>('task');
   const [filterType, setFilterType] = useState<'all' | 'event' | 'task' | 'birthday'>('all');
 
   // Form State
@@ -79,7 +74,6 @@ export default function TaskManagerScreen() {
       return;
     }
 
-    setIsLoading(true);
     try {
       const res = await authFetch(`${getApiBaseUrl()}/api/tasks`);
       if (res.ok) {
@@ -89,8 +83,6 @@ export default function TaskManagerScreen() {
     } catch (error) {
       console.log('Error loading tasks:', error);
       Alert.alert('Error', 'Failed to load tasks. Please check your connection.');
-    } finally {
-      setIsLoading(false);
     }
   }, [userId]);
 
@@ -136,12 +128,6 @@ export default function TaskManagerScreen() {
   };
 
   // Calculate reminder datetime
-  const calculateReminderDatetime = (eventDatetime: Date, reminderMinutes: number): string => {
-    const reminderMs = reminderMinutes * 60 * 1000;
-    const reminderDate = new Date(eventDatetime.getTime() - reminderMs);
-    return reminderDate.toISOString();
-  };
-
     // Save task
     const handleSaveTask = async () => {
       if (!formTitle.trim()) {
@@ -194,7 +180,7 @@ export default function TaskManagerScreen() {
         if (userId) {
           let response;
           if (editingTask) {
-            response = await authFetch(`${getApiBaseUrl()}/api/tasks/${editingTask.id}`, {
+            response = await authFetch(`${getApiBaseUrl()}/api/tasks/${editingTask._id}`, {
               method: 'PUT',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify(newTask),
@@ -306,11 +292,11 @@ export default function TaskManagerScreen() {
           onPress: async () => {
             try {
               if (userId) {
-                await authFetch(`${getApiBaseUrl()}/api/tasks/${task.id}`, {
+                await authFetch(`${getApiBaseUrl()}/api/tasks/${task._id}`, {
                   method: 'DELETE',
                 });
               }
-              const updatedTasks = tasks.filter(t => t.id !== task.id);
+              const updatedTasks = tasks.filter(t => t._id !== task._id);
               setTasks(updatedTasks);
             } catch (error) {
               console.log('Error deleting task:', error);
@@ -328,14 +314,14 @@ export default function TaskManagerScreen() {
 
     try {
       if (userId) {
-        await authFetch(`${getApiBaseUrl()}/api/tasks/${task.id}`, {
+        await authFetch(`${getApiBaseUrl()}/api/tasks/${task._id}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ status: newStatus }),
         });
       }
 
-      const updatedTasks: TaskItem[] = tasks.map(t => t.id === task.id ? updatedTask : t);
+      const updatedTasks: TaskItem[] = tasks.map(t => t._id === task._id ? updatedTask : t);
       setTasks(updatedTasks);
     } catch (error) {
       console.log('Error toggling status:', error);
@@ -349,6 +335,7 @@ export default function TaskManagerScreen() {
       weekday: 'short',
       month: 'short',
       day: 'numeric',
+      timeZone: 'Asia/Kolkata',
     };
     if (!allDay) {
       options.hour = '2-digit';
@@ -490,7 +477,7 @@ export default function TaskManagerScreen() {
       <Modal visible={showAddMenu} transparent animationType="fade">
         <TouchableOpacity style={styles.menuOverlay} onPress={handleCloseMenu}>
           <View style={[styles.addMenu, { bottom: Math.max(insets.bottom, 30) + 80 }]}>
-            {menuItems.map((item, index) => (
+            {menuItems.map((item) => (
               <TouchableOpacity
                 key={item.type}
                 style={[styles.menuItem, { backgroundColor: item.color + '20' }]}

@@ -24,7 +24,6 @@ import {
 import { auth } from "../firebaseConfig";
 import { parseApiResponse } from "../utils/api";
 
-const MIN_RECORDING_MS = 5000;
 const VOICE_RECORDING_OPTIONS = RecordingPresets.HIGH_QUALITY;
 
 export default function AddJournalScreen() {
@@ -169,13 +168,7 @@ export default function AddJournalScreen() {
         return;
       }
 
-      const recordedDurationMs = recorderState.durationMillis || Math.round(audioRecorder.currentTime * 1000) || 0;
-      if (recordedDurationMs < MIN_RECORDING_MS) {
-        Alert.alert("Speak Longer", "Please record for at least five seconds before sending.");
-        return;
-      }
-
-      await transcribeRecording(audioUri);
+await transcribeRecording(audioUri);
     } catch (error) {
       console.warn("Journal recording failed to stop", error);
       Alert.alert("Recording Error", "Could not finish microphone recording.");
@@ -286,7 +279,7 @@ export default function AddJournalScreen() {
         body: JSON.stringify({
           userId: user.uid, 
           userEmail: user.email, // <--- Added email here
-          title: `Entry for ${dateString}`, // <--- Added title here
+          title: existingId ? (params.title as string || `Entry for ${dateString}`) : `Entry for ${dateString}`,
           content: content,
           aiAnalysis: analysis, 
         }),
@@ -352,7 +345,7 @@ export default function AddJournalScreen() {
         autoSend: "1",
         contextType: "journal",
         context: JSON.stringify({
-          title: `Entry for ${dateString}`,
+          title: existingId ? (params.title as string || `Entry for ${dateString}`) : `Entry for ${dateString}`,
           journalContent: content.trim(),
           journalAnalysis: analysis.trim(),
           source: "add-journal",

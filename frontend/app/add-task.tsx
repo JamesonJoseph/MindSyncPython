@@ -231,8 +231,8 @@ export default function AddTaskScreen() {
           <Ionicons name="close" size={28} color="#333" />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Add Task</Text>
-        <TouchableOpacity onPress={handleSave} style={styles.headerButton}>
-          <Text style={styles.saveText}>Save</Text>
+        <TouchableOpacity onPress={handleSave} disabled={saving} style={[styles.headerButton, saving && { opacity: 0.5 }]}>
+          <Text style={styles.saveText}>{saving ? 'Saving...' : 'Save'}</Text>
         </TouchableOpacity>
       </View>
 

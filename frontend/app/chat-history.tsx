@@ -280,11 +280,13 @@ export default function ChatHistoryScreen() {
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
+        <TouchableOpacity onPress={() => router.push('/home')} style={styles.backButton}>
           <Ionicons name="arrow-back" size={24} color="#333" />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Saved Chats</Text>
-        <View style={{ width: 24 }} />
+        <TouchableOpacity onPress={() => router.push('/chat')} style={styles.backButton}>
+          <Ionicons name="add" size={24} color="#333" />
+        </TouchableOpacity>
       </View>
 
       <View style={styles.searchContainer}>

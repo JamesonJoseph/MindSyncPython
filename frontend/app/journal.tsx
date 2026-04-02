@@ -118,7 +118,7 @@ export default function JournalScreen() {
             const { authFetch } = await import('../utils/api');
             await authFetch(`${apiUrl}/api/journals/${id}`, { method: "DELETE" });
             fetchJournals(); 
-          } catch (error) {
+          } catch (_error) {
             Alert.alert("Error", "Could not delete journal.");
           }
         } 
@@ -137,7 +137,7 @@ export default function JournalScreen() {
           try {
             await auth.signOut();
             router.replace('/'); 
-          } catch (error) {
+          } catch (_error) {
             Alert.alert("Error", "Failed to sign out.");
           }
         } 
@@ -161,11 +161,6 @@ export default function JournalScreen() {
           </View>
           <View style={{ flexDirection: "row", gap: 15 }}>
             <Ionicons name="search" size={24} color="#00b894" />
-            
-            {/* SIGN OUT BUTTON */}
-            <TouchableOpacity onPress={handleSignOut}>
-              <Ionicons name="log-out-outline" size={24} color="#ff7675" />
-            </TouchableOpacity>
           </View>
         </View>
 

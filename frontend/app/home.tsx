@@ -128,6 +128,24 @@ export default function HomeScreen() {
     }
   };
 
+  const handleSignOut = () => {
+    Alert.alert("Sign Out", "Are you sure you want to log out?", [
+      { text: "Cancel", style: "cancel" },
+      { 
+        text: "Logout", 
+        style: "destructive", 
+        onPress: async () => {
+          try {
+            await auth.signOut();
+            router.replace('/'); 
+          } catch (_error) {
+            Alert.alert("Error", "Failed to sign out.");
+          }
+        } 
+      }
+    ]);
+  };
+
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
       {/* Hidden camera for background emotion detection */}
@@ -152,7 +170,12 @@ export default function HomeScreen() {
             </View>
             <Text style={styles.dashboardText}>Dashboard</Text>
           </View>
-          <Ionicons name="notifications-outline" size={24} color="#333" />
+          <View style={{ flexDirection: 'row', gap: 15 }}>
+            <TouchableOpacity onPress={handleSignOut}>
+              <Ionicons name="log-out-outline" size={24} color="#ff7675" />
+            </TouchableOpacity>
+            <Ionicons name="notifications-outline" size={24} color="#333" />
+          </View>
         </View>
 
         <View style={styles.greetingContainer}>
@@ -217,20 +240,12 @@ export default function HomeScreen() {
             <Text style={styles.cardSubtitle}>Voice companion</Text>
           </TouchableOpacity>
 
-          <TouchableOpacity style={styles.gridCard}>
-            <View style={[styles.iconBox, { backgroundColor: '#FFEDD5' }]}>
-              <Ionicons name="calendar-outline" size={24} color="#F97316" />
+          <TouchableOpacity style={styles.gridCard} onPress={() => router.push('/docs')}>
+            <View style={[styles.iconBox, { backgroundColor: '#FCE7F3' }]}>
+              <MaterialCommunityIcons name="folder-lock-outline" size={24} color="#EC4899" />
             </View>
-            <Text style={styles.cardTitle}>Calendar</Text>
-            <Text style={styles.cardSubtitle}>Meeting @ 10 AM</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity style={styles.gridCard}>
-            <View style={[styles.iconBox, { backgroundColor: '#E0F2FE' }]}>
-              <Ionicons name="wallet-outline" size={24} color="#0284C7" />
-            </View>
-            <Text style={styles.cardTitle}>Budget</Text>
-            <Text style={styles.cardSubtitle}>It's Fine</Text>
+            <Text style={styles.cardTitle}>Documents</Text>
+            <Text style={styles.cardSubtitle}>Secure Vault</Text>
           </TouchableOpacity>
 
         </View>
@@ -241,7 +256,7 @@ export default function HomeScreen() {
       {/* --- FLOATING ROBOT BUTTON --- */}
       <TouchableOpacity 
         style={[styles.fab, { bottom: 90 + insets.bottom }]}
-        onPress={() => router.push('/chat' as any)}
+        onPress={() => router.push('/chat-history')}
       >
         <MaterialCommunityIcons name="robot-outline" size={28} color="#000" />
       </TouchableOpacity>

@@ -42,12 +42,12 @@ GEMINI_API_KEY = (
     os.getenv("GEMINI_API_KEY", "").strip()
     or os.getenv("EXPO_PUBLIC_GEMINI_API_KEY", "").strip()
 )
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash").strip()
 GEMINI_FALLBACK_MODELS = [
     model.strip()
     for model in os.getenv(
         "GEMINI_FALLBACK_MODELS",
-        "gemini-1.5-flash,gemini-1.5-flash-8b"
+        "gemini-2.0-flash-lite"
     ).split(",")
     if model.strip()
 ]
@@ -56,7 +56,7 @@ PORT = int(os.getenv("PORT", "5000"))
 DB_CONNECT_TIMEOUT_MS = int(os.getenv("DB_CONNECT_TIMEOUT_MS", "8000"))
 ANALYZE_TIMEOUT_SECONDS = float(os.getenv("ANALYZE_TIMEOUT_SECONDS", "12"))
 ANALYZE_CACHE_TTL_SECONDS = _env_int("ANALYZE_CACHE_TTL_SECONDS", 900)
-FAST_ANALYSIS_CHAR_LIMIT = _env_int("FAST_ANALYSIS_CHAR_LIMIT", 140)
+FAST_ANALYSIS_CHAR_LIMIT = _env_int("FAST_ANALYSIS_CHAR_LIMIT", 30)
 
 if not MONGO_URI:
     raise RuntimeError("MONGO_URI is required in environment variables.")
@@ -176,7 +176,7 @@ def _serialize_doc(doc: dict) -> dict:
         if "_id" in out:
             out["_id"] = str(out["_id"])
         # Handle various datetime fields
-        datetime_fields = ["date", "dueDate", "event_datetime", "reminder_datetime", "created_at"]
+        datetime_fields = ["date", "dueDate", "event_datetime", "reminder_datetime", "created_at", "createdAt"]
         for field in datetime_fields:
             if isinstance(out.get(field), datetime):
                 out[field] = out[field].isoformat()
@@ -485,7 +485,7 @@ def _get_gemini_http_client() -> httpx.AsyncClient:
     return _gemini_http_client
 
 def _default_emotion_payload(details: str = "No clear face detected.") -> dict:
-    return {"emotion": "neutral", "confidence": 0, "details": details}
+    return {"emotion": "neutral", "confidence": 0, "details": details, "fallback": True}
 
 
 def _log_emotion_debug(message: str) -> None:
@@ -633,6 +633,7 @@ async def _analyze_with_gemini(base64_image: str, mime_type: str) -> dict:
                 response.raise_for_status()
             except Exception as exc:
                 last_error = exc
+                await response.aclose()
                 continue
 
         decoded = response.json()
@@ -669,7 +670,7 @@ async def _safe_analyze_emotion(base64_image: str, mime_type: str) -> dict:
     try:
         result = await asyncio.wait_for(
             _analyze_with_gemini(base64_image, mime_type),
-            timeout=12.0,
+            timeout=ANALYZE_TIMEOUT_SECONDS,
         )
     except Exception as exc:
         print(f"[emotion] gemini fallback triggered: {type(exc).__name__}: {exc}")
@@ -956,9 +957,10 @@ async def get_birthdays(request: Request):
 async def create_birthday(request: Request):
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
+    email = auth_info.get("email")
     _, _, _, _, _, _, _, birthdays, _, _ = _get_collections()
     payload = await request.json()
-    
+
     birthday_date = payload.get("date", "")
     month_day = ""
     if birthday_date:
@@ -967,9 +969,10 @@ async def create_birthday(request: Request):
             month_day = f"{dt.month:02d}-{dt.day:02d}"
         except:
             month_day = birthday_date[5:] if len(birthday_date) >= 5 else ""
-    
+
     doc = {
         "userId": str(uid or ""),
+        "userEmail": str(email or ""),
         "name": str(payload.get("name", "")),
         "date": birthday_date,
         "monthDay": month_day,
@@ -1044,7 +1047,13 @@ async def get_events(request: Request, date: str | None = None):
     
     query = {"userId": uid}
     if date:
-        query["date"] = {"$regex": f"^{date}"}
+        try:
+            target = datetime.fromisoformat(date)
+            day_start = target.replace(hour=0, minute=0, second=0, microsecond=0)
+            day_end = target.replace(hour=23, minute=59, second=59, microsecond=999999)
+            query["date"] = {"$gte": day_start, "$lte": day_end}
+        except ValueError:
+            query["date"] = {"$regex": f"^{date}"}
     
     docs = list(events.find(query).sort("date", ASCENDING))
     return [_serialize_doc(doc) for doc in docs]
@@ -1053,18 +1062,20 @@ async def get_events(request: Request, date: str | None = None):
 async def create_event(request: Request):
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
+    email = auth_info.get("email")
     _, _, _, _, _, _, _, _, events, _ = _get_collections()
     payload = await request.json()
-    
+
     event_date = payload.get("date", "")
     if event_date:
         try:
             event_date = datetime.fromisoformat(event_date.replace("Z", "+00:00"))
         except:
             event_date = _utc_now()
-    
+
     doc = {
         "userId": str(uid or ""),
+        "userEmail": str(email or ""),
         "title": str(payload.get("title", "Untitled Event")),
         "description": str(payload.get("description", "")),
         "date": event_date,
@@ -1128,6 +1139,7 @@ async def delete_event(event_id: str, request: Request):
 
 @app.post("/api/analyze")
 async def analyze_journal(request: Request):
+    auth_info = await _require_auth(request)
     payload = await request.json()
     content = str(payload.get("content", ""))
     fallback_analysis = _build_local_journal_analysis(content)
@@ -1201,7 +1213,10 @@ async def detect_emotion(
         print("\n=== GEMINI API CRASH ===")
         traceback.print_exc()
         print("========================\n")
-        return _default_emotion_payload("Emotion detection failed, so a neutral result was returned.")
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Emotion detection failed. Please try again."}
+        )
 
 # ==================== CHAT AGENT ====================
 
@@ -1557,7 +1572,8 @@ Current Goal: Listen empathetically, validate the user's current emotional state
         }
         
         call_messages = [system_msg] + messages
-        response = groq_client.chat.completions.create(
+        response = await asyncio.to_thread(
+            groq_client.chat.completions.create,
             model="llama-3.1-8b-instant",
             messages=call_messages,
             max_tokens=4096
@@ -1646,7 +1662,7 @@ async def analyze_voice(
         try:
             config = aai.TranscriptionConfig(speech_models=["universal-3-pro", "universal-2"])
             transcriber = aai.Transcriber()
-            transcript = transcriber.transcribe(tmp_path, config=config)
+            transcript = await asyncio.to_thread(transcriber.transcribe, tmp_path, config=config)
             transcript_text = transcript.text if getattr(transcript, 'text', None) else ""
             transcript_error = getattr(transcript, 'error', None)
             _log_voice_debug(
@@ -1714,7 +1730,8 @@ The 'emotion' field should be a single word (e.g., happy, joyful, sad, anxious, 
         messages.append({"role": "user", "content": transcript_text})
 
         if groq_client:
-            chat_completion = groq_client.chat.completions.create(
+            chat_completion = await asyncio.to_thread(
+                groq_client.chat.completions.create,
                 messages=messages,
                 model="llama-3.1-8b-instant",
                 temperature=0.7,
@@ -1767,8 +1784,8 @@ The 'emotion' field should be a single word (e.g., happy, joyful, sad, anxious, 
                 "date": _utc_now(),
             }
             voice_analyses_col.insert_one(voice_doc)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[avatar] db save failed: {e}")
 
         return {
             "transcript": transcript_text,
@@ -1794,6 +1811,9 @@ async def text_to_speech(request: Request):
         
         if not text:
             return JSONResponse(status_code=400, content={"error": "Text is required"})
+
+        if not CAMB_API_KEY:
+            return JSONResponse(status_code=503, content={"error": "TTS service is not configured on the server."})
         
         url = "https://client.camb.ai/apis/tts-stream"
         
@@ -1840,9 +1860,11 @@ async def early_warning_analysis(request: Request):
         payload = await request.json()
         user_id = payload.get("userId")
         
+        auth_info = await _require_auth(request)
+        user_id = auth_info.get("uid")
         if not user_id:
-            return JSONResponse(status_code=400, content={"error": "userId is required"})
-        
+            return JSONResponse(status_code=400, content={"error": "Authentication required"})
+
         # Get user data
         user_context = await _get_user_context(user_id)
         
@@ -1869,7 +1891,15 @@ Recent Journal Entries: {user_context.get('recent_journals', 'No entries')}
 
 Recent Tasks: {user_context.get('recent_tasks', 'No tasks')}"""
 
-        chat_completion = groq_client.chat.completions.create(
+        if not groq_client:
+            return {
+                "level": "green",
+                "message": "You're doing great! Keep up the good work.",
+                "recommendation": "Continue your current practices."
+            }
+
+        chat_completion = await asyncio.to_thread(
+            groq_client.chat.completions.create,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_data_summary}

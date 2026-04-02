@@ -243,7 +243,7 @@ export default function ChatScreen() {
                     typeof item.content === 'string'
                 )
                 .map((item: Message, index: number) => ({
-                  id: `${conversationId}-cached-${index}`,
+                  id: `${conversationId}-${index}`,
                   role: item.role,
                   content: item.content,
                 }))
@@ -267,7 +267,7 @@ export default function ChatScreen() {
           throw new Error(message);
         }
 
-        const loadedMessages = Array.isArray(data?.messages)
+          const loadedMessages = Array.isArray(data?.messages)
           ? data.messages
               .filter(
                 (item: any): item is Message =>
@@ -328,7 +328,6 @@ export default function ChatScreen() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          userId: activeUserId,
           messages: apiMessages,
         }),
       });
@@ -353,15 +352,6 @@ export default function ChatScreen() {
 
       setMessages(prev => {
         const finalMessages = [...prev, assistantMsg];
-
-        // Auto-save if this is the first assistant response and it's not already saved
-        if (!conversationId && finalMessages.filter(m => m.role === 'user').length >= 1) {
-          // We use a small timeout to let state update or just call saveConversation with messages
-          setTimeout(() => {
-            saveConversation(finalMessages);
-          }, 500);
-        }
-
         return finalMessages;
       });
     } catch (error) {
@@ -415,8 +405,14 @@ export default function ChatScreen() {
     requestAssistantReply(updatedMessages);
   };
 
-  const saveConversation = async (messagesToSave?: Message[]) => {
-    const targetMessages = messagesToSave || messages;
+  const saveConversation = async (messagesToSave?: Message[], doNavigateAfterSave?: boolean) => {
+    const msgs = messagesToSave ?? messages ?? [];
+    const targetMessages: Message[] = Array.isArray(msgs) 
+      ? msgs.filter(m => m && m.role && m.content)
+      : [];
+    
+    console.log('Saving conversation with messages:', targetMessages.length);
+    
     if (targetMessages.length === 0) {
       if (!messagesToSave) Alert.alert('Nothing to Save', 'Start a conversation first.');
       return;
@@ -493,7 +489,13 @@ export default function ChatScreen() {
       } catch (error) {
         console.warn('Failed to update recent chats cache after save', error);
       }
-      if (!messagesToSave) Alert.alert('Saved', 'The full conversation has been saved.');
+      if (doNavigateAfterSave) {
+        try {
+          router.replace('/chat-history');
+        } catch (e) {
+          router.push('/chat-history');
+        }
+      }
     } catch (error) {
       if (!isTimeoutError(error)) {
         console.warn('Failed to save conversation', error);
@@ -570,6 +572,13 @@ export default function ChatScreen() {
                 throw new Error(message);
               }
               await AsyncStorage.removeItem(`${CONVERSATION_CACHE_PREFIX}${conversationId}`);
+              const cachedChats = await AsyncStorage.getItem(RECENT_CHATS_CACHE_KEY);
+              if (cachedChats) {
+                const items = JSON.parse(cachedChats).filter(
+                  (c: any) => c.conversationId !== conversationId
+                );
+                await AsyncStorage.setItem(RECENT_CHATS_CACHE_KEY, JSON.stringify(items));
+              }
               setConversationId('');
               router.replace('/chat-history');
             } catch (error) {
@@ -651,16 +660,21 @@ export default function ChatScreen() {
   return (
     <KeyboardAvoidingView 
       style={[styles.container, { paddingTop: insets.top }]} 
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
     >
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
+        <TouchableOpacity onPress={() => router.push('/chat-history')} style={styles.backButton}>
           <Ionicons name="arrow-back" size={24} color="#333" />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>MindSync AI</Text>
         <View style={styles.headerActions}>
-          <TouchableOpacity onPress={() => router.push('/chat-history')} style={styles.headerIconButton}>
-            <Ionicons name="time-outline" size={22} color="#333" />
+          <TouchableOpacity onPress={() => {
+              setConversationId('');
+              setMessages([{ id: '1', role: 'assistant', content: 'Hello! How can I help you today?' }]);
+              router.push('/chat');
+            }} style={styles.headerIconButton}>
+            <Ionicons name="add" size={22} color="#333" />
           </TouchableOpacity>
           <TouchableOpacity
             onPress={() => {
@@ -680,7 +694,10 @@ export default function ChatScreen() {
             <Ionicons name="trash-outline" size={20} color="#d64545" />
           </TouchableOpacity>
           <TouchableOpacity
-            onPress={saveConversation}
+            onPress={() => {
+              if (savingConversation) return;
+              saveConversation(messages, true);
+            }}
             style={[styles.saveHeaderButton, savingConversation && { opacity: 0.6 }]}
             disabled={savingConversation}
           >
@@ -706,92 +723,6 @@ export default function ChatScreen() {
         </View>
       ) : (
         <View style={styles.chatBody}>
-          {!conversationId && !(typeof initialMessagesParam === 'string' && initialMessagesParam.trim()) && (
-            <View style={styles.discoverySection}>
-              <View style={styles.previousChatsHeader}>
-                <Text style={styles.previousChatsTitle}>Previous Chats</Text>
-                <TouchableOpacity onPress={() => router.push('/chat-history')}>
-                  <Text style={styles.previousChatsLink}>View all</Text>
-                </TouchableOpacity>
-              </View>
-
-              {loadingRecentChats ? (
-                <ActivityIndicator color="#00E0C6" size="small" />
-              ) : recentConversations.length > 0 ? (
-                recentConversations.map(item => (
-                  <TouchableOpacity
-                    key={item._id}
-                    style={styles.previousChatCard}
-                    onPress={() => {
-                      setScreenError('');
-                      setConversationId(item._id);
-                    }}
-                  >
-                    <View style={styles.previousChatTextWrap}>
-                      <Text style={styles.previousChatTitle} numberOfLines={1}>
-                        {item.title || 'MindSync Chat'}
-                      </Text>
-                      <Text style={styles.previousChatPreview} numberOfLines={2}>
-                        {item.lastMessage || 'Continue this conversation'}
-                      </Text>
-                    </View>
-                    <Ionicons name="chevron-forward" size={18} color="#999" />
-                  </TouchableOpacity>
-                ))
-              ) : (
-                <Text style={styles.previousChatsEmpty}>No saved chats yet.</Text>
-              )}
-
-              <View style={[styles.previousChatsHeader, { marginTop: 14 }]}>
-                <Text style={styles.previousChatsTitle}>Previous Journals</Text>
-                <TouchableOpacity onPress={() => router.push('/journal')}>
-                  <Text style={styles.previousChatsLink}>View all</Text>
-                </TouchableOpacity>
-              </View>
-
-              {loadingRecentJournals ? (
-                <ActivityIndicator color="#00E0C6" size="small" />
-              ) : recentJournals.length > 0 ? (
-                recentJournals.map(item => (
-                  <View key={item._id} style={styles.previousJournalCard}>
-                    <View style={styles.previousChatTextWrap}>
-                      <Text style={styles.previousChatTitle} numberOfLines={1}>
-                        {item.title || 'Journal Entry'}
-                      </Text>
-                      <Text style={styles.previousChatPreview} numberOfLines={2}>
-                        {item.content || 'Open this journal entry'}
-                      </Text>
-                    </View>
-                    <View style={styles.previousJournalActions}>
-                      <TouchableOpacity
-                        style={styles.previousJournalButton}
-                        onPress={() => router.push({
-                          pathname: '/add-journal',
-                          params: {
-                            id: item._id,
-                            title: item.title || '',
-                            content: item.content || '',
-                            analysis: item.aiAnalysis || '',
-                          },
-                        } as any)}
-                      >
-                        <Text style={styles.previousJournalButtonText}>Edit</Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity
-                        style={[styles.previousJournalButton, styles.previousJournalButtonPrimary]}
-                        onPress={() => continueFromJournal(item)}
-                      >
-                        <Text style={styles.previousJournalButtonPrimaryText}>Continue</Text>
-                      </TouchableOpacity>
-                    </View>
-                  </View>
-                ))
-              ) : (
-                <Text style={styles.previousChatsEmpty}>No previous journals yet.</Text>
-              )}
-            </View>
-          )}
-
           <FlatList
             ref={flatListRef}
             data={[...messages].reverse()}
@@ -799,11 +730,16 @@ export default function ChatScreen() {
             keyExtractor={item => item.id}
             renderItem={renderItem}
             contentContainerStyle={styles.chatList}
+            onContentSizeChange={() => {
+              setTimeout(() => {
+                flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
+              }, 100);
+            }}
           />
         </View>
       )}
 
-      <View style={[styles.inputContainer, { marginBottom: Math.max(insets.bottom, 10) + 64 }]}>
+      <View style={styles.inputContainer}>
         <TextInput
           style={styles.textInput}
           placeholder="Type your message to MindSync AI..."
@@ -823,30 +759,6 @@ export default function ChatScreen() {
           ) : (
              <Ionicons name="send" size={20} color="#fff" />
           )}
-        </TouchableOpacity>
-      </View>
-
-      {/* Bottom Navigation */}
-      <View style={[styles.bottomNav, { paddingBottom: Math.max(insets.bottom, 10) }]}>
-        <TouchableOpacity style={styles.navItem} onPress={() => router.push('/home')}>
-          <Ionicons name="home-outline" size={26} color="#888" />
-          <Text style={styles.navText}>Home</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.navItem} onPress={() => router.push('/journal')}>
-          <Ionicons name="book-outline" size={26} color="#888" />
-          <Text style={styles.navText}>Journal</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.navItem} onPress={() => router.push('/avatar')}>
-          <MaterialCommunityIcons name="account-voice" size={26} color="#888" />
-          <Text style={styles.navText}>Avatar</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.navItem} onPress={() => router.push('/tasks')}>
-          <Ionicons name="checkbox-outline" size={26} color="#888" />
-          <Text style={styles.navText}>Tasks</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.navItem}>
-          <Ionicons name="documents-outline" size={26} color="#888" />
-          <Text style={styles.navText}>Docs</Text>
         </TouchableOpacity>
       </View>
 
@@ -927,7 +839,6 @@ const styles = StyleSheet.create({
   chatList: {
     paddingHorizontal: 15,
     paddingVertical: 20,
-    paddingBottom: 80,
   },
   chatBody: {
     flex: 1,

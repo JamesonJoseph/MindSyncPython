@@ -13,12 +13,14 @@ import {
   Linking,
   Modal,
 } from 'react-native';
+import { WebView } from 'react-native-webview';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import * as Clipboard from 'expo-clipboard';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
+import * as Sharing from 'expo-sharing';
 import { auth } from '../firebaseConfig';
 import { getApiBaseUrl, parseApiResponse } from '../utils/api';
 import { useVault, VaultEntry, VaultEntryType } from './contexts/VaultContext';
@@ -92,6 +94,9 @@ export default function DocsScreen() {
   const [showAddModal, setShowAddModal] = useState(false);
   const [selectedEntry, setSelectedEntry] = useState<VaultEntry | null>(null);
   const [editingEntry, setEditingEntry] = useState<VaultEntry | null>(null);
+  const [defaultType, setDefaultType] = useState<VaultEntryType | null>(null);
+  const [showPdfModal, setShowPdfModal] = useState(false);
+  const [pdfUrl, setPdfUrl] = useState<string>('');
 
   useEffect(() => {
     if (isLocked) {
@@ -157,36 +162,67 @@ export default function DocsScreen() {
     await Linking.openURL(target);
   };
 
-  const handleOpenPdf = async (entry: VaultEntry) => {
+  const downloadPdfToCache = async (entry: VaultEntry): Promise<string | null> => {
     if (!entry.url) {
       Alert.alert('Missing PDF', 'No PDF file is stored for this entry.');
-      return;
+      return null;
     }
 
+    const user = auth.currentUser;
+    if (!user?.uid) {
+      Alert.alert('Authentication Error', 'You must be logged in to open this PDF.');
+      return null;
+    }
+
+    const token = await user.getIdToken(false);
+    const apiUrl = getApiBaseUrl();
+    const safeName = (entry.fileName || `${entry.title}.pdf`).replace(/[^\w.\-]/g, '_');
+    const fileUri = `${FileSystem.cacheDirectory}${safeName}`;
+    const targetUrl = entry.url.startsWith('http')
+      ? entry.url
+      : `${apiUrl}${entry.url.startsWith('/') ? '' : '/'}${entry.url}`;
+
+    await FileSystem.downloadAsync(targetUrl, fileUri, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'X-User-Id': user.uid,
+        ...(user.email ? { 'X-User-Email': user.email } : {}),
+      },
+    });
+
+    return fileUri;
+  };
+
+  const handleViewPdf = async (entry: VaultEntry) => {
     try {
-      const user = auth.currentUser;
-      if (!user?.uid) {
-        Alert.alert('Authentication Error', 'You must be logged in to open this PDF.');
-        return;
-      }
-      const token = await user.getIdToken(false);
-      const apiUrl = getApiBaseUrl();
-      const safeName = (entry.fileName || `${entry.title}.pdf`).replace(/[^\w.\-]/g, '_');
-      const fileUri = `${FileSystem.cacheDirectory || FileSystem.documentDirectory}${safeName}`;
-      const targetUrl = entry.url.startsWith('http')
-        ? entry.url
-        : `${apiUrl}${entry.url.startsWith('/') ? '' : '/'}${entry.url}`;
-      await FileSystem.downloadAsync(targetUrl, fileUri, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'X-User-Id': user.uid,
-          ...(user.email ? { 'X-User-Email': user.email } : {}),
-        },
-      });
-      await Linking.openURL(fileUri);
+      const fileUri = await downloadPdfToCache(entry);
+      if (!fileUri) return;
+
+      const uri = fileUri.startsWith('file://') ? fileUri : `file://${fileUri}`;
+      setPdfUrl(uri);
+      setShowPdfModal(true);
     } catch (error) {
-      console.warn('Open PDF failed', error);
+      console.warn('View PDF failed', error);
       Alert.alert('Open Failed', 'Could not open this PDF on the device.');
+    }
+  };
+
+  const handleSharePdf = async (entry: VaultEntry) => {
+    try {
+      const fileUri = await downloadPdfToCache(entry);
+      if (!fileUri) return;
+      const isAvailable = await Sharing.isAvailableAsync();
+      if (isAvailable) {
+        await Sharing.shareAsync(fileUri, {
+          mimeType: 'application/pdf',
+          dialogTitle: entry.title,
+        });
+      } else {
+        await Linking.openURL(fileUri);
+      }
+    } catch (error) {
+      console.warn('Share PDF failed', error);
+      Alert.alert('Share Failed', 'Could not share this PDF.');
     }
   };
 
@@ -243,12 +279,20 @@ export default function DocsScreen() {
           )}
 
           {item.entryType === 'pdf' && (
-            <TouchableOpacity
-              style={styles.actionButton}
-              onPress={() => handleOpenPdf(item)}
-            >
-              <Ionicons name="open-outline" size={20} color={config.accent} />
-            </TouchableOpacity>
+            <>
+              <TouchableOpacity
+                style={styles.actionButton}
+                onPress={() => handleViewPdf(item)}
+              >
+                <Ionicons name="document-outline" size={20} color={config.accent} />
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.actionButton}
+                onPress={() => handleSharePdf(item)}
+              >
+                <Ionicons name="share-outline" size={20} color={config.accent} />
+              </TouchableOpacity>
+            </>
           )}
 
           {item.entryType === 'url' && !!item.url && (
@@ -320,7 +364,14 @@ export default function DocsScreen() {
       >
         <View style={styles.typeGrid}>
           {(Object.keys(ENTRY_CONFIG) as VaultEntryType[]).map(type => (
-            <View key={type} style={styles.typeCard}>
+            <TouchableOpacity
+              key={type}
+              style={styles.typeCard}
+              onPress={() => {
+                setDefaultType(type);
+                setShowAddModal(true);
+              }}
+            >
               <MaterialCommunityIcons
                 name={ENTRY_CONFIG[type].icon as any}
                 size={24}
@@ -328,7 +379,7 @@ export default function DocsScreen() {
               />
               <Text style={styles.typeCardTitle}>{ENTRY_CONFIG[type].label}</Text>
               <Text style={styles.typeCardHelper}>{ENTRY_CONFIG[type].helper}</Text>
-            </View>
+            </TouchableOpacity>
           ))}
         </View>
 
@@ -408,7 +459,12 @@ export default function DocsScreen() {
         </TouchableOpacity>
       </View>
 
-      {showAddModal && <AddVaultEntryModal onClose={() => setShowAddModal(false)} />}
+      {showAddModal && (
+        <AddVaultEntryModal
+          initialType={defaultType}
+          onClose={() => { setShowAddModal(false); setDefaultType(null); }}
+        />
+      )}
       {editingEntry && (
         <AddVaultEntryModal
           initialEntry={editingEntry}
@@ -432,10 +488,30 @@ export default function DocsScreen() {
           setSelectedEntry(null);
           handleDelete(id);
         }}
-        onOpenPdf={handleOpenPdf}
+        onViewPdf={handleViewPdf}
+        onSharePdf={handleSharePdf}
         onOpenLink={handleOpenLink}
         onCopy={handleCopy}
       />
+
+      <Modal visible={showPdfModal} transparent animationType="slide" onRequestClose={() => setShowPdfModal(false)}>
+        <View style={styles.pdfModalOverlay}>
+          <View style={[styles.pdfModalContent, { paddingTop: insets.top + 10 }]}>
+            <View style={styles.pdfModalHeader}>
+              <Text style={styles.pdfModalTitle}>PDF Viewer</Text>
+              <TouchableOpacity onPress={() => setShowPdfModal(false)}>
+                <Ionicons name="close" size={28} color="#333" />
+              </TouchableOpacity>
+            </View>
+            <WebView
+              source={{ uri: pdfUrl }}
+              style={styles.pdfWebView}
+              startInLoadingState={true}
+              scalesPageToFit={true}
+            />
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -446,7 +522,8 @@ function EntryDetailModal({
   onClose,
   onEdit,
   onDelete,
-  onOpenPdf,
+  onViewPdf,
+  onSharePdf,
   onOpenLink,
   onCopy,
 }: {
@@ -455,7 +532,8 @@ function EntryDetailModal({
   onClose: () => void;
   onEdit: (entry: VaultEntry) => void;
   onDelete: (id: string) => void;
-  onOpenPdf: (entry: VaultEntry) => Promise<void>;
+  onViewPdf: (entry: VaultEntry) => Promise<void>;
+  onSharePdf: (entry: VaultEntry) => Promise<void>;
   onOpenLink: (value: string, label: string) => Promise<void>;
   onCopy: (text: string) => Promise<void>;
 }) {
@@ -535,10 +613,16 @@ function EntryDetailModal({
               </>
             )}
             {entry.entryType === 'pdf' && (
-              <TouchableOpacity style={styles.detailActionButton} onPress={() => onOpenPdf(entry)}>
-                <Ionicons name="document-outline" size={18} color="#111827" />
-                <Text style={styles.detailActionText}>Open PDF</Text>
-              </TouchableOpacity>
+              <>
+                <TouchableOpacity style={styles.detailActionButton} onPress={() => onViewPdf(entry)}>
+                  <Ionicons name="document-outline" size={18} color="#111827" />
+                  <Text style={styles.detailActionText}>View PDF</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.detailActionButton} onPress={() => onSharePdf(entry)}>
+                  <Ionicons name="share-outline" size={18} color="#111827" />
+                  <Text style={styles.detailActionText}>Share</Text>
+                </TouchableOpacity>
+              </>
             )}
             {entry.entryType === 'text' && !!entry.content && (
               <TouchableOpacity style={styles.detailActionButton} onPress={() => onCopy(entry.content || '')}>
@@ -564,16 +648,18 @@ function EntryDetailModal({
 function AddVaultEntryModal({
   onClose,
   initialEntry,
+  initialType,
   onSave,
 }: {
   onClose: () => void;
   initialEntry?: VaultEntry | null;
+  initialType?: VaultEntryType | null;
   onSave?: (updates: Partial<VaultEntry>) => Promise<void>;
 }) {
   const insets = useSafeAreaInsets();
   const { addEntry } = useVault();
   const isEditing = !!initialEntry;
-  const [entryType, setEntryType] = useState<VaultEntryType>(initialEntry?.entryType || 'pdf');
+  const [entryType, setEntryType] = useState<VaultEntryType>(initialEntry?.entryType || initialType || 'password');
   const [title, setTitle] = useState(initialEntry?.title || '');
   const [folder, setFolder] = useState(initialEntry?.category || 'General');
   const [username, setUsername] = useState(initialEntry?.username || '');
@@ -588,7 +674,7 @@ function AddVaultEntryModal({
   const [pdfAssetUri, setPdfAssetUri] = useState('');
   const [isUploadingPdf, setIsUploadingPdf] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
-  const [existingStoragePath, setExistingStoragePath] = useState(initialEntry?.storagePath || '');
+  const [existingStoragePath] = useState(initialEntry?.storagePath || '');
 
   const pickPdf = async () => {
     setIsPickingPdf(true);
@@ -729,7 +815,7 @@ function AddVaultEntryModal({
         await addEntry(payload as any);
       }
       onClose();
-    } catch (error) {
+    } catch (_error) {
       Alert.alert('Error', 'Failed to save item');
     } finally {
       setIsUploadingPdf(false);
@@ -1398,5 +1484,31 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 16,
     fontWeight: '600',
+  },
+  pdfModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.9)',
+  },
+  pdfModalContent: {
+    flex: 1,
+    backgroundColor: '#fff',
+    marginTop: 40,
+  },
+  pdfModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e5e5e5',
+  },
+  pdfModalTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: '#333',
+  },
+  pdfWebView: {
+    flex: 1,
   },
 });

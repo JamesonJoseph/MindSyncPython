@@ -293,11 +293,12 @@ export default function TasksScreen() {
        return { ...prev, [dateStr]: [...dateTasks, newTask] };
      });
      
-     // Close modal immediately
-     setNewTaskTitle('');
-     setTaskDescription('');
-     setTaskPriority('medium');
-     setTaskTime('');
+     // Close modal and reset form AFTER API call to avoid stale closure
+     const capturedTitle = newTaskTitle.trim();
+     const capturedDescription = taskDescription;
+     const capturedPriority = taskPriority;
+     const capturedTime = taskTime;
+     
      setShowTaskModal(false);
      
      // Send request to backend
@@ -308,13 +309,13 @@ export default function TasksScreen() {
          headers: { 'Content-Type': 'application/json' },
          body: JSON.stringify({ 
            userId, 
-           title: newTaskTitle.trim(),
-           description: taskDescription,
-           priority: taskPriority,
+           title: capturedTitle,
+           description: capturedDescription,
+           priority: capturedPriority,
            event_datetime,
-           time: taskTime,
+           time: capturedTime,
            type: 'task',
-           allDay: !taskTime,
+           allDay: !capturedTime,
            reminder_minutes: 30,
            status: 'pending'
          }),
@@ -327,15 +328,14 @@ export default function TasksScreen() {
          // For simplicity, we'll just show an error and let user retry
          Alert.alert('Error', 'Failed to save task. Please try again.');
          loadData(); // Reload to get correct state
-       } else {
-         // Success
-         setShowTaskModal(false);
-         setNewTaskTitle('');
-         setTaskDescription('');
-         setTaskTime('');
-         setTaskPriority('medium');
-         loadData(); // Refresh list
-       }
+        } else {
+          // Success
+          setNewTaskTitle('');
+          setTaskDescription('');
+          setTaskTime('');
+          setTaskPriority('medium');
+          loadData(); // Refresh list
+        }
      } catch (error) {
        console.log('Error adding task', error);
        // Rollback optimistic update on error
@@ -349,12 +349,19 @@ export default function TasksScreen() {
      
      const dateStr = getDateKeyFromDate(selectedDate);
      
+     // Capture values before closing modal to avoid stale closure
+     const capturedTitle = newTaskTitle.trim();
+     const capturedDescription = taskDescription;
+     const capturedPriority = taskPriority;
+     const capturedTime = taskTime;
+     
      // Optimistically update task in local state
      const updatedTask = {
        ...editingTask,
-       title: newTaskTitle.trim(),
-       description: taskDescription,
-       priority: taskPriority
+       title: capturedTitle,
+       description: capturedDescription,
+       priority: capturedPriority,
+       time: capturedTime,
      };
      
      // Update local state immediately
@@ -368,9 +375,6 @@ export default function TasksScreen() {
      
      // Close modal immediately
      setEditingTask(null);
-     setNewTaskTitle('');
-     setTaskDescription('');
-     setTaskPriority('medium');
      setShowTaskModal(false);
      
      // Send request to backend
@@ -380,9 +384,10 @@ export default function TasksScreen() {
          method: 'PUT',
          headers: { 'Content-Type': 'application/json' },
          body: JSON.stringify({ 
-           title: newTaskTitle.trim(),
-           description: taskDescription,
-           priority: taskPriority,
+           title: capturedTitle,
+           description: capturedDescription,
+           priority: capturedPriority,
+           time: capturedTime,
          }),
        });
        
@@ -541,7 +546,11 @@ export default function TasksScreen() {
           const priorityColor = getPriorityColor(item.priority);
           
           return (
-            <View style={[styles.itemCard, { borderLeftColor: priorityColor }]}>
+            <TouchableOpacity
+              style={[styles.itemCard, { borderLeftColor: priorityColor }]}
+              onPress={() => router.push(`/task-detail?id=${item._id}&title=${encodeURIComponent(item.title)}&description=${encodeURIComponent(item.description || '')}&priority=${item.priority || 'medium'}&status=${item.status}&event_datetime=${encodeURIComponent(item.event_datetime || '')}&time=${encodeURIComponent(item.time || '')}`)}
+              activeOpacity={0.7}
+            >
               <View style={styles.itemLeft}>
                 <TouchableOpacity 
                   style={styles.checkButton}
@@ -575,7 +584,7 @@ export default function TasksScreen() {
                   <Ionicons name="trash-outline" size={18} color="#FF3B30" />
                 </TouchableOpacity>
               </View>
-            </View>
+            </TouchableOpacity>
           );
         }}
         ListHeaderComponent={
@@ -685,16 +694,18 @@ export default function TasksScreen() {
             {getEventsForDate(selectedDate).length > 0 && (
               <View style={styles.dateBirthdaysSection}>
                 {getEventsForDate(selectedDate).map((event) => (
-                  <View 
+                  <TouchableOpacity 
                     key={event._id} 
                     style={[styles.dateBirthdayCard, { borderLeftColor: event.color }]}
+                    onPress={() => router.push(`/event-detail?id=${event._id}&title=${encodeURIComponent(event.title)}&date=${encodeURIComponent(event.date)}&time=${encodeURIComponent(event.time || '')}&color=${encodeURIComponent(event.color)}`)}
                   >
                     <Text style={styles.dateBirthdayIcon}>📅</Text>
                     <View style={styles.dateBirthdayInfo}>
                       <Text style={styles.dateBirthdayName}>{event.title}</Text>
                       {event.time && <Text style={styles.dateBirthdayRelation}>{event.time}</Text>}
                     </View>
-                  </View>
+                    <Ionicons name="chevron-forward" size={20} color="#999" />
+                  </TouchableOpacity>
                 ))}
               </View>
             )}
@@ -765,7 +776,7 @@ export default function TasksScreen() {
           <Ionicons name="checkbox-outline" size={26} color="#00E0C6" />
           <Text style={[styles.navText, { color: '#00E0C6' }]}>Tasks</Text>
         </TouchableOpacity>
-        <TouchableOpacity style={styles.navItem} onPress={() => router.push('/vault')}>
+        <TouchableOpacity style={styles.navItem} onPress={() => router.push('/docs')}>
           <Ionicons name="documents-outline" size={26} color="#888" />
           <Text style={styles.navText}>Docs</Text>
         </TouchableOpacity>

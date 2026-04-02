@@ -16,17 +16,14 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import Animated, { useAnimatedStyle, withTiming, useSharedValue, Easing } from 'react-native-reanimated';
-import * as KeepAwake from 'expo-keep-awake';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 
 import { useAudioRecorder, useAudioRecorderState, requestRecordingPermissionsAsync, setAudioModeAsync, RecordingPresets } from 'expo-audio';
 import * as Speech from 'expo-speech';
-import { auth } from '../firebaseConfig';
-import { parseApiResponse } from '../utils/api';
+import { authFetch, parseApiResponse } from '../utils/api';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const AVATAR_SIZE = SCREEN_WIDTH - 40;
-const MIN_RECORDING_MS = 5000;
 const VOICE_RECORDING_OPTIONS = RecordingPresets.HIGH_QUALITY;
 
 type AvatarState = 'idle' | 'listening' | 'thinking' | 'speaking_happy' | 'speaking_compassionate';
@@ -56,7 +53,6 @@ const SOURCES = {
 };
 
 export default function AvatarScreen() {
-  KeepAwake.useKeepAwake();
   const router = useRouter();
   const insets = useSafeAreaInsets();
   
@@ -72,6 +68,7 @@ export default function AvatarScreen() {
   const [isHistoryLoading, setIsHistoryLoading] = useState(false);
   
   const responseSpokenRef = useRef<string | null>(null);
+  const speakingStartedRef = useRef<boolean>(false);
 
   useEffect(() => {
     fetchHistory();
@@ -80,7 +77,6 @@ export default function AvatarScreen() {
   const fetchHistory = async () => {
     try {
       setIsHistoryLoading(true);
-      const { authFetch } = await import('../utils/api');
       const response = await authFetch('/api/avatar/history');
       if (response.ok) {
         const data = await response.json();
@@ -138,7 +134,7 @@ export default function AvatarScreen() {
     // 3. Smooth fade-in of the new state
     videoOpacity.value = 0;
     videoOpacity.value = withTiming(1, { duration: 300 });
-  }, [avatarState, players]);
+  }, [avatarState]);
 
   // SPEECH ENGINE: Simplified for maximum reliability
   useEffect(() => {
@@ -153,10 +149,17 @@ export default function AvatarScreen() {
           language: 'en-US',
           pitch: 1.0,
           rate: 0.9,
-          onDone: () => setAvatarState('idle'),
-          onStopped: () => setAvatarState('idle'),
-          onError: () => setAvatarState('idle'),
+          onDone: () => {
+            if (speakingStartedRef.current) { speakingStartedRef.current = false; setAvatarState('idle'); }
+          },
+          onStopped: () => {
+            if (speakingStartedRef.current) { speakingStartedRef.current = false; setAvatarState('idle'); }
+          },
+          onError: () => {
+            speakingStartedRef.current = false; setAvatarState('idle');
+          },
         });
+        speakingStartedRef.current = true;
       });
     }
   }, [avatarState, aiResponse]);
@@ -171,8 +174,6 @@ export default function AvatarScreen() {
   // --- AUDIO LOGIC ---
   const audioRecorder = useAudioRecorder(VOICE_RECORDING_OPTIONS);
   const recorderState = useAudioRecorderState(audioRecorder);
-  const userId = auth.currentUser?.uid || '';
-  const userEmail = auth.currentUser?.email || '';
 
   const resetAudioSessionForRecording = async () => {
     Speech.stop();
@@ -208,6 +209,7 @@ export default function AvatarScreen() {
     setAiResponse(null);
     setShowResponse(false);
     responseSpokenRef.current = null;
+    speakingStartedRef.current = false;
 
     try {
       await resetAudioSessionForRecording();
@@ -231,11 +233,6 @@ export default function AvatarScreen() {
 
   const handleStopListening = async () => {
     if (!audioRecorder || !recorderState?.isRecording) return;
-    const durationBeforeStop = recorderState.durationMillis || Math.round(audioRecorder.currentTime * 1000) || 0;
-    if (durationBeforeStop < MIN_RECORDING_MS) {
-      Alert.alert('Speak Longer', 'Keep speaking for at least five seconds before stopping.');
-      return;
-    }
     setIsListening(false);
     setIsProcessing(true);
     setAvatarState('thinking');
@@ -247,16 +244,6 @@ export default function AvatarScreen() {
       await setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true });
       if (!uri) {
         Alert.alert('Recording Error', 'No audio was captured. Please try again.');
-        setAvatarState('idle');
-        return;
-      }
-
-      const recordedDurationMs = Math.max(
-        durationBeforeStop,
-        Math.round(audioRecorder.currentTime * 1000) || 0
-      );
-      if (recordedDurationMs < MIN_RECORDING_MS) {
-        Alert.alert('Speak Longer', 'The recording was too short. Try speaking for at least five seconds.');
         setAvatarState('idle');
         return;
       }
@@ -275,7 +262,6 @@ export default function AvatarScreen() {
   };
 
   const processVoiceRecording = async (audioUri: string) => {
-    setIsProcessing(true);
     setAvatarState('thinking');
     try {
       const formData = new FormData();
@@ -284,12 +270,7 @@ export default function AvatarScreen() {
         name: 'journal-recording.m4a',
         type: 'audio/m4a',
       } as any);
-      // uid and email are already handled by authFetch's token verification on the backend, 
-      // but we keep them for extra context if needed by the backend logic.
-      formData.append('userId', userId || 'anonymous');
-      formData.append('userEmail', userEmail || 'anonymous@example.com');
 
-      const { authFetch } = await import('../utils/api');
       const response = await authFetch('/api/avatar/analyze-voice', {
         method: 'POST',
         headers: { 'Accept': 'application/json' },
@@ -385,11 +366,7 @@ export default function AvatarScreen() {
             {isProcessing ? <ActivityIndicator size="large" color="#fff" /> : <Ionicons name={isListening ? 'stop' : 'mic'} size={32} color="#fff" />}
           </TouchableOpacity>
           <Text style={styles.micHint}>
-            {isListening
-              ? recorderState.durationMillis < MIN_RECORDING_MS
-                ? `Keep speaking... ${Math.max(0, Math.ceil((MIN_RECORDING_MS - recorderState.durationMillis) / 1000))}s`
-                : 'Tap to stop'
-              : 'Tap to speak to me'}
+            {isListening ? 'Tap to stop' : 'Tap to speak to me'}
           </Text>
         </View>
 

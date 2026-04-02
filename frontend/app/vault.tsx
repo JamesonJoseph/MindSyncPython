@@ -28,7 +28,6 @@ export default function VaultScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { 
-    entries, 
     isLocked, 
     isLoading, 
     unlockVault, 
@@ -71,10 +70,6 @@ export default function VaultScreen() {
         { text: 'Delete', style: 'destructive', onPress: () => deleteEntry(id) },
       ]
     );
-  };
-
-  const getCategoryIcon = (category: string) => {
-    return CATEGORY_ICONS[category] || 'folder';
   };
 
   const renderItem = ({ item }: { item: VaultEntry }) => {

@@ -4,6 +4,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as LocalAuthentication from 'expo-local-authentication';
 import { onAuthStateChanged } from 'firebase/auth';
 import { auth } from '../../firebaseConfig';
+import { parseApiResponse } from '../../utils/api';
 
 const legacyBase64Decode = (str: string): string => {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
@@ -34,8 +35,6 @@ const legacyBase64Decode = (str: string): string => {
 
   return result;
 };
-
-import { parseApiResponse } from '../../utils/api';
 
 export type VaultEntryType = 'password' | 'url' | 'pdf' | 'text';
 
@@ -85,9 +84,11 @@ function normalizeEntry(raw: any): VaultEntry | null {
       ? raw.entryType
       : raw.password
         ? 'password'
-        : raw.url
+        : raw.url && /^https?:\/\//i.test(String(raw.url))
           ? 'url'
-          : 'text';
+          : raw.storagePath || raw.mimeType === 'application/pdf'
+            ? 'pdf'
+            : 'text';
 
   return {
     id: String(raw.id || Crypto.randomUUID()),
@@ -284,7 +285,7 @@ export function VaultProvider({ children }: { children: ReactNode }) {
       createdAt: Date.now(),
     };
     const updatedEntries = [newEntry, ...entries];
-    setEntries(updatedEntries);
+    setEntries(prev => [newEntry, ...prev]);
 
     try {
       const encryptedAll = await encryptData(JSON.stringify(updatedEntries), key);
@@ -319,8 +320,8 @@ export function VaultProvider({ children }: { children: ReactNode }) {
 
   const deleteEntry = async (id: string) => {
     const entryToDelete = entries.find(e => e.id === id);
-    const updatedEntries = entries.filter(e => e.id !== id);
-    setEntries(updatedEntries);
+    const filtered = entries.filter(e => e.id !== id);
+    setEntries(filtered);
     try {
       const key = await getActiveEncryptionKey();
       if (entryToDelete?.entryType === 'pdf' && entryToDelete.storagePath) {
@@ -335,7 +336,7 @@ export function VaultProvider({ children }: { children: ReactNode }) {
           method: 'DELETE'
         });
       }
-      const encrypted = await encryptData(JSON.stringify(updatedEntries), key);
+      const encrypted = await encryptData(JSON.stringify(filtered), key);
       await AsyncStorage.setItem(STORAGE_KEY, encrypted);
     } catch (e) {
       console.log('Delete from backend failed', e);
@@ -381,6 +382,7 @@ export function VaultProvider({ children }: { children: ReactNode }) {
         setIsLocked(false);
         return true;
       }
+      return false;
     }
     setIsLocked(false);
     return true;
