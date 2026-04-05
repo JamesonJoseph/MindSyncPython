@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useCallback } from 'react';
 import {
   View,
   Text,
@@ -14,25 +14,68 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
+import { useRouter, useFocusEffect } from 'expo-router';
 import { authFetch, parseApiResponse } from '../utils/api';
-import { toISTISOString } from '../utils/timezone';
+import { getISTDateString, toISTISOString } from '../utils/timezone';
 import { requestNotificationPermissions, scheduleTaskReminder, scheduleEventReminder, scheduleBirthdayReminder } from '../utils/notifications';
 import { useAuthSession } from '../utils/useAuthSession';
 
 // Types
 interface TaskItem {
   _id: string;
-  id?: number | string;
   title: string;
   type: 'event' | 'task' | 'birthday';
+  source: 'tasks' | 'events' | 'birthdays';
   allDay: boolean;
   event_datetime: string;
   reminder_minutes: number;
-  reminder_datetime?: string;
   status: 'pending' | 'completed';
   created_at: string;
+  id?: number | string;
+  time?: string;
+  description?: string;
+  color?: string;
+  relation?: string;
 }
+
+interface TaskRecord {
+  _id: string;
+  id?: number | string;
+  title: string;
+  description?: string;
+  allDay?: boolean;
+  event_datetime?: string;
+  date?: string;
+  reminder_minutes?: number;
+  status?: 'pending' | 'completed';
+  createdAt?: string;
+  time?: string;
+}
+
+interface EventRecord {
+  _id: string;
+  title: string;
+  description?: string;
+  date: string;
+  time?: string;
+  color?: string;
+  createdAt?: string;
+}
+
+interface BirthdayRecord {
+  _id: string;
+  name: string;
+  date: string;
+  relation?: string;
+  color?: string;
+  createdAt?: string;
+}
+
+type CollectionLoadResult<T> = {
+  ok: boolean;
+  data: T[];
+  error: string | null;
+};
 
 const TYPE_COLORS = {
   event: '#FF9500',
@@ -71,6 +114,45 @@ export default function TaskManagerScreen() {
   const [showCustomReminder, setShowCustomReminder] = useState(false);
   const [customReminderValue, setCustomReminderValue] = useState('');
 
+  const loadCollection = useCallback(async <T,>(path: string): Promise<CollectionLoadResult<T>> => {
+    try {
+      const response = await authFetch(path, { timeoutMs: 45000 });
+      const payload = await parseApiResponse<any>(response);
+      if (!response.ok) {
+        const message =
+          typeof payload?.error === 'string' ? payload.error :
+          typeof payload?.detail === 'string' ? payload.detail :
+          `Failed to load ${path}.`;
+        return { ok: false, data: [], error: message };
+      }
+
+      return {
+        ok: true,
+        data: Array.isArray(payload) ? payload as T[] : [],
+        error: null,
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        data: [],
+        error:
+          error instanceof Error && error.message
+            ? error.message
+            : `Failed to load ${path}.`,
+      };
+    }
+  }, []);
+
+  const normalizeBirthdayDate = useCallback((date: string) => {
+    if (!date) {
+      return '';
+    }
+    if (/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return toISTISOString(date);
+    }
+    return date;
+  }, []);
+
   // Load tasks
   const loadTasks = useCallback(async () => {
     if (!isAuthReady) {
@@ -88,36 +170,92 @@ export default function TaskManagerScreen() {
       setIsLoading(true);
       setErrorMessage(null);
 
-      const res = await authFetch('/api/tasks');
-      const data = await parseApiResponse<any>(res);
-      if (!res.ok) {
-        const message =
-          typeof data?.error === 'string' ? data.error :
-          typeof data?.detail === 'string' ? data.detail :
-          'Failed to load tasks.';
-        throw new Error(message);
+      const [tasksResult, eventsResult, birthdaysResult] = await Promise.all([
+        loadCollection<TaskRecord>('/api/tasks'),
+        loadCollection<EventRecord>('/api/events'),
+        loadCollection<BirthdayRecord>('/api/birthdays'),
+      ]);
+
+      const normalizedTasks: TaskItem[] = tasksResult.data
+        .filter((item) => Boolean(item._id) && Boolean(item.event_datetime || item.date))
+        .map((item) => ({
+          _id: item._id,
+          id: item.id,
+          title: item.title || 'Untitled Task',
+          type: 'task',
+          source: 'tasks',
+          allDay: item.allDay ?? !item.time,
+          event_datetime: item.event_datetime || item.date || '',
+          reminder_minutes: typeof item.reminder_minutes === 'number' ? item.reminder_minutes : 30,
+          status: item.status === 'completed' ? 'completed' : 'pending',
+          created_at: item.createdAt || new Date().toISOString(),
+          time: item.time,
+          description: item.description,
+          color: TYPE_COLORS.task,
+        }));
+
+      const normalizedEvents: TaskItem[] = eventsResult.data
+        .filter((item) => Boolean(item._id) && Boolean(item.date))
+        .map((item) => ({
+          _id: item._id,
+          title: item.title || 'Untitled Event',
+          type: 'event',
+          source: 'events',
+          allDay: !item.time,
+          event_datetime: item.date,
+          reminder_minutes: 0,
+          status: 'pending',
+          created_at: item.createdAt || new Date().toISOString(),
+          time: item.time,
+          description: item.description,
+          color: item.color || TYPE_COLORS.event,
+        }));
+
+      const normalizedBirthdays: TaskItem[] = birthdaysResult.data
+        .filter((item) => Boolean(item._id) && Boolean(item.date))
+        .map((item) => ({
+          _id: item._id,
+          title: item.name || 'Birthday',
+          type: 'birthday',
+          source: 'birthdays',
+          allDay: true,
+          event_datetime: normalizeBirthdayDate(item.date),
+          reminder_minutes: 0,
+          status: 'pending',
+          created_at: item.createdAt || new Date().toISOString(),
+          color: item.color || TYPE_COLORS.birthday,
+          relation: item.relation,
+        }));
+
+      const mergedItems = [...normalizedTasks, ...normalizedEvents, ...normalizedBirthdays]
+        .filter((item) => Boolean(item.event_datetime))
+        .sort((a, b) => new Date(a.event_datetime).getTime() - new Date(b.event_datetime).getTime());
+
+      if (tasksResult.ok || eventsResult.ok || birthdaysResult.ok) {
+        setTasks(mergedItems);
       }
 
-      setTasks(Array.isArray(data) ? data as TaskItem[] : []);
-    } catch (error) {
-      console.log('Error loading tasks:', error);
-      setErrorMessage(
-        error instanceof Error && error.message
-          ? error.message
-          : 'Failed to load tasks. Please check your connection.'
-      );
+      const failures = [
+        tasksResult.ok ? null : `Tasks: ${tasksResult.error || 'request failed'}`,
+        eventsResult.ok ? null : `Events: ${eventsResult.error || 'request failed'}`,
+        birthdaysResult.ok ? null : `Birthdays: ${birthdaysResult.error || 'request failed'}`,
+      ].filter((value): value is string => Boolean(value));
+
+      setErrorMessage(failures.length > 0 ? failures.join('  ') : null);
     } finally {
       setIsLoading(false);
     }
-  }, [isAuthReady, userId]);
+  }, [isAuthReady, loadCollection, normalizeBirthdayDate, userId]);
 
-  useEffect(() => {
-    if (!isAuthReady) {
-      return;
-    }
+  useFocusEffect(
+    useCallback(() => {
+      if (!isAuthReady) {
+        return;
+      }
 
-    void loadTasks();
-  }, [isAuthReady, loadTasks]);
+      void loadTasks();
+    }, [isAuthReady, loadTasks])
+  );
 
   // Open add menu
   const handleOpenMenu = () => {
@@ -132,19 +270,28 @@ export default function TaskManagerScreen() {
   // Open form for new item
   const handleSelectType = (type: 'event' | 'task' | 'birthday') => {
     setShowAddMenu(false);
-    setEditingTask(null);
-    setFormType(type);
-    setFormTitle('');
-    setFormAllDay(true);
-    const today = new Date();
-    setFormDate(today.toISOString().split('T')[0]);
-    setFormTime('');
-    setFormReminder(30);
-    setShowFormModal(true);
+    const dateParam = getISTDateString(new Date());
+
+    if (type === 'task') {
+      router.push(`/add-task?date=${dateParam}`);
+      return;
+    }
+
+    if (type === 'event') {
+      router.push(`/add-event?date=${dateParam}`);
+      return;
+    }
+
+    router.push(`/add-birthday?date=${dateParam}`);
   };
 
   // Open form for editing
   const handleEditTask = (task: TaskItem) => {
+    if (task.type !== 'task') {
+      handleOpenDetails(task);
+      return;
+    }
+
     setEditingTask(task);
     setFormType(task.type);
     setFormTitle(task.title);
@@ -196,12 +343,15 @@ export default function TaskManagerScreen() {
         id: editingTask?.id || Date.now(),
         title: formTitle.trim(),
         type: formType,
+        source: 'tasks',
         allDay: formAllDay,
         event_datetime: event_datetime, // IST-converted ISO string for backend
         reminder_minutes: formReminder,
         // reminder_datetime: reminderDatetime, // Let backend calculate this
         status: editingTask?.status || 'pending',
         created_at: editingTask?.created_at || new Date().toISOString(),
+        time: formTime,
+        color: TYPE_COLORS.task,
       };
 
       try {
@@ -222,12 +372,15 @@ export default function TaskManagerScreen() {
             });
           }
 
+          const responseData = await parseApiResponse<any>(response);
           if (!response.ok) {
-            const errorData = await response.json();
-            throw new Error(errorData.error || 'Failed to save task');
+            const message =
+              typeof responseData?.error === 'string' ? responseData.error :
+              typeof responseData?.detail === 'string' ? responseData.detail :
+              'Failed to save task';
+            throw new Error(message);
           }
 
-          const responseData = await response.json();
           savedTaskId = responseData._id || responseData.id;
         }
 
@@ -310,6 +463,12 @@ export default function TaskManagerScreen() {
 
   // Delete task
   const handleDeleteTask = async (task: TaskItem) => {
+    const endpoint = task.type === 'task'
+      ? '/api/tasks'
+      : task.type === 'event'
+        ? '/api/events'
+        : '/api/birthdays';
+
     Alert.alert(
       'Delete Item',
       `Delete "${task.title}"?`,
@@ -321,7 +480,7 @@ export default function TaskManagerScreen() {
           onPress: async () => {
             try {
               if (userId) {
-                await authFetch(`/api/tasks/${task._id}`, {
+                await authFetch(`${endpoint}/${task._id}`, {
                   method: 'DELETE',
                 });
               }
@@ -338,6 +497,10 @@ export default function TaskManagerScreen() {
 
   // Toggle status
   const handleToggleStatus = async (task: TaskItem) => {
+    if (task.type !== 'task') {
+      return;
+    }
+
     const newStatus: 'pending' | 'completed' = task.status === 'completed' ? 'pending' : 'completed';
     const updatedTask: TaskItem = { ...task, status: newStatus };
 
@@ -355,6 +518,20 @@ export default function TaskManagerScreen() {
     } catch (error) {
       console.log('Error toggling status:', error);
     }
+  };
+
+  const handleOpenDetails = (item: TaskItem) => {
+    if (item.type === 'task') {
+      router.push(`/task-detail?id=${item._id}&title=${encodeURIComponent(item.title)}&description=${encodeURIComponent(item.description || '')}&priority=medium&status=${item.status}&event_datetime=${encodeURIComponent(item.event_datetime || '')}&time=${encodeURIComponent(item.time || '')}`);
+      return;
+    }
+
+    if (item.type === 'event') {
+      router.push(`/event-detail?id=${item._id}&title=${encodeURIComponent(item.title)}&date=${encodeURIComponent(item.event_datetime || '')}&time=${encodeURIComponent(item.time || '')}&color=${encodeURIComponent(item.color || TYPE_COLORS.event)}`);
+      return;
+    }
+
+    router.push(`/birthday-detail?id=${item._id}&name=${encodeURIComponent(item.title)}&date=${encodeURIComponent(item.event_datetime || '')}&relation=${encodeURIComponent(item.relation || '')}&color=${encodeURIComponent(item.color || TYPE_COLORS.birthday)}`);
   };
 
   // Format datetime for display
@@ -465,11 +642,15 @@ export default function TaskManagerScreen() {
           </View>
         }
         renderItem={({ item }) => (
-          <View style={[styles.taskCard, { borderLeftColor: TYPE_COLORS[item.type] }]}>
+          <TouchableOpacity
+            activeOpacity={0.8}
+            onPress={() => handleOpenDetails(item)}
+            style={[styles.taskCard, { borderLeftColor: item.color || TYPE_COLORS[item.type] }]}
+          >
             <View style={styles.taskTypeBar} />
             <View style={styles.taskContent}>
               <View style={styles.taskHeader}>
-                <Ionicons name={TYPE_ICONS[item.type] as any} size={18} color={TYPE_COLORS[item.type]} />
+                <Ionicons name={TYPE_ICONS[item.type] as any} size={18} color={item.color || TYPE_COLORS[item.type]} />
                 <Text style={styles.taskType}>{item.type}</Text>
                 {item.allDay && <View style={styles.allDayBadge}><Text style={styles.allDayText}>All Day</Text></View>}
               </View>
@@ -480,27 +661,44 @@ export default function TaskManagerScreen() {
                 <Ionicons name="time-outline" size={14} color="#888" />
                 <Text style={styles.taskMetaText}>{formatDateTime(item.event_datetime, item.allDay)}</Text>
               </View>
-              <View style={styles.taskMeta}>
-                <Ionicons name="notifications-outline" size={14} color="#888" />
-                <Text style={styles.taskMetaText}>{formatReminder(item.reminder_minutes)}</Text>
-              </View>
+              {item.type === 'task' ? (
+                <View style={styles.taskMeta}>
+                  <Ionicons name="notifications-outline" size={14} color="#888" />
+                  <Text style={styles.taskMetaText}>{formatReminder(item.reminder_minutes)}</Text>
+                </View>
+              ) : null}
+              {item.type === 'birthday' && item.relation ? (
+                <View style={styles.taskMeta}>
+                  <Ionicons name="people-outline" size={14} color="#888" />
+                  <Text style={styles.taskMetaText}>{item.relation}</Text>
+                </View>
+              ) : null}
             </View>
             <View style={styles.taskActions}>
-              <TouchableOpacity
-                style={styles.actionBtn}
-                onPress={() => handleToggleStatus(item)}
-              >
-                <Ionicons
-                  name={item.status === 'completed' ? 'checkmark-circle' : 'ellipse-outline'}
-                  size={22}
-                  color={item.status === 'completed' ? '#34C759' : '#666'}
-                />
-              </TouchableOpacity>
+              {item.type === 'task' ? (
+                <TouchableOpacity
+                  style={styles.actionBtn}
+                  onPress={() => handleToggleStatus(item)}
+                >
+                  <Ionicons
+                    name={item.status === 'completed' ? 'checkmark-circle' : 'ellipse-outline'}
+                    size={22}
+                    color={item.status === 'completed' ? '#34C759' : '#666'}
+                  />
+                </TouchableOpacity>
+              ) : (
+                <TouchableOpacity
+                  style={styles.actionBtn}
+                  onPress={() => handleOpenDetails(item)}
+                >
+                  <Ionicons name="chevron-forward" size={18} color="#666" />
+                </TouchableOpacity>
+              )}
               <TouchableOpacity
                 style={styles.actionBtn}
                 onPress={() => handleEditTask(item)}
               >
-                <Ionicons name="pencil" size={18} color="#666" />
+                <Ionicons name={item.type === 'task' ? 'pencil' : 'open-outline'} size={18} color="#666" />
               </TouchableOpacity>
               <TouchableOpacity
                 style={styles.actionBtn}
@@ -509,7 +707,7 @@ export default function TaskManagerScreen() {
                 <Ionicons name="trash" size={18} color="#FF3B30" />
               </TouchableOpacity>
             </View>
-          </View>
+          </TouchableOpacity>
         )}
       />
 

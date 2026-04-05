@@ -1025,11 +1025,20 @@ async def delete_task(task_id: str, request: Request):
 
 @app.get("/api/birthdays")
 async def get_birthdays(request: Request):
-    auth_info = await _require_auth(request)
-    uid = auth_info.get("uid")
-    _, _, _, _, _, _, _, birthdays, _, _ = _get_collections()
-    docs = list(birthdays.find({"userId": uid}))
-    return [_serialize_doc(doc) for doc in docs]
+    try:
+        auth_info = await _require_auth(request)
+        uid = auth_info.get("uid")
+        _, _, _, _, _, _, _, birthdays, _, _ = _get_collections()
+        docs = await asyncio.to_thread(lambda: list(birthdays.find({"userId": uid})))
+        return [_serialize_doc(doc) for doc in docs]
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print("[birthdays] fetch failed:", exc)
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Failed to fetch birthdays", "detail": "Database query failed"},
+        )
 
 @app.post("/api/birthdays")
 async def create_birthday(request: Request):
@@ -1119,22 +1128,31 @@ async def delete_birthday(birthday_id: str, request: Request):
 
 @app.get("/api/events")
 async def get_events(request: Request, date: str | None = None):
-    auth_info = await _require_auth(request)
-    uid = auth_info.get("uid")
-    _, _, _, _, _, _, _, _, events, _ = _get_collections()
-    
-    query = {"userId": uid}
-    if date:
-        try:
-            target = datetime.fromisoformat(date)
-            day_start = target.replace(hour=0, minute=0, second=0, microsecond=0)
-            day_end = target.replace(hour=23, minute=59, second=59, microsecond=999999)
-            query["date"] = {"$gte": day_start, "$lte": day_end}
-        except ValueError:
-            query["date"] = {"$regex": f"^{date}"}
-    
-    docs = list(events.find(query).sort("date", ASCENDING))
-    return [_serialize_doc(doc) for doc in docs]
+    try:
+        auth_info = await _require_auth(request)
+        uid = auth_info.get("uid")
+        _, _, _, _, _, _, _, _, events, _ = _get_collections()
+
+        query = {"userId": uid}
+        if date:
+            try:
+                target = datetime.fromisoformat(date)
+                day_start = target.replace(hour=0, minute=0, second=0, microsecond=0)
+                day_end = target.replace(hour=23, minute=59, second=59, microsecond=999999)
+                query["date"] = {"$gte": day_start, "$lte": day_end}
+            except ValueError:
+                query["date"] = {"$regex": f"^{date}"}
+
+        docs = await asyncio.to_thread(lambda: list(events.find(query).sort("date", ASCENDING)))
+        return [_serialize_doc(doc) for doc in docs]
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print("[events] fetch failed:", exc)
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Failed to fetch events", "detail": "Database query failed"},
+        )
 
 @app.post("/api/events")
 async def create_event(request: Request):

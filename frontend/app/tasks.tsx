@@ -52,6 +52,12 @@ type Event = {
   color: string;
 };
 
+type CollectionLoadResult<T> = {
+  ok: boolean;
+  data: T[];
+  error: string | null;
+};
+
 type PriorityOption = {
   value: Task['priority'];
   label: string;
@@ -104,6 +110,35 @@ export default function TasksScreen() {
   const [taskTime, setTaskTime] = useState('');
   const [showTimePicker, setShowTimePicker] = useState(false);
 
+  const loadCollection = useCallback(async <T,>(path: string): Promise<CollectionLoadResult<T>> => {
+    try {
+      const response = await authFetch(path, { timeoutMs: 45000 });
+      const payload = await parseApiResponse<any>(response);
+      if (!response.ok) {
+        const message =
+          typeof payload?.error === 'string' ? payload.error :
+          typeof payload?.detail === 'string' ? payload.detail :
+          `Failed to load ${path}.`;
+        return { ok: false, data: [], error: message };
+      }
+
+      return {
+        ok: true,
+        data: Array.isArray(payload) ? payload as T[] : [],
+        error: null,
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        data: [],
+        error:
+          error instanceof Error && error.message
+            ? error.message
+            : `Failed to load ${path}.`,
+      };
+    }
+  }, []);
+
    const getISTDateKey = (isoString?: string): string => {
      if (!isoString) return '';
      const istDate = fromISOToIST(isoString);
@@ -139,67 +174,58 @@ export default function TasksScreen() {
     setLoadingTasks(true);
     setErrorMessage(null);
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 30000);
-
     try {
-      const [tasksRes, birthdaysRes, eventsRes] = await Promise.all([
-        authFetch('/api/tasks', { signal: controller.signal }),
-        authFetch('/api/birthdays', { signal: controller.signal }),
-        authFetch('/api/events', { signal: controller.signal }),
+      const [tasksResult, birthdaysResult, eventsResult] = await Promise.all([
+        loadCollection<Task>('/api/tasks'),
+        loadCollection<Birthday>('/api/birthdays'),
+        loadCollection<Event>('/api/events'),
       ]);
 
-      const tasksData = await parseApiResponse<any>(tasksRes);
-      if (!tasksRes.ok) {
-        const message =
-          typeof tasksData?.error === 'string' ? tasksData.error :
-          typeof tasksData?.detail === 'string' ? tasksData.detail :
-          'Failed to load tasks.';
-        throw new Error(message);
+      if (tasksResult.ok) {
+        const grouped: Record<string, Task[]> = {};
+        tasksResult.data.forEach((task) => {
+          const dateStr = task.event_datetime || task.date;
+          const dateKey = getISTDateKey(dateStr);
+          if (!dateKey) {
+            return;
+          }
+          if (!grouped[dateKey]) {
+            grouped[dateKey] = [];
+          }
+          grouped[dateKey].push(task);
+        });
+
+        Object.keys(grouped).forEach((key) => {
+          grouped[key].sort((a, b) => {
+            const priorityOrder = { high: 0, medium: 1, low: 2 };
+            const aOrder = a.priority ? priorityOrder[a.priority] : 3;
+            const bOrder = b.priority ? priorityOrder[b.priority] : 3;
+            return aOrder - bOrder;
+          });
+        });
+
+        setTasksByDate(grouped);
       }
 
-      const tasks = Array.isArray(tasksData) ? tasksData as Task[] : [];
-      const grouped: Record<string, Task[]> = {};
-      tasks.forEach((task) => {
-        const dateStr = task.event_datetime || task.date;
-        const dateKey = getISTDateKey(dateStr);
-        if (!dateKey) {
-          return;
-        }
-        if (!grouped[dateKey]) {
-          grouped[dateKey] = [];
-        }
-        grouped[dateKey].push(task);
-      });
+      if (birthdaysResult.ok) {
+        setBirthdays(birthdaysResult.data);
+      }
 
-      Object.keys(grouped).forEach((key) => {
-        grouped[key].sort((a, b) => {
-          const priorityOrder = { high: 0, medium: 1, low: 2 };
-          const aOrder = a.priority ? priorityOrder[a.priority] : 3;
-          const bOrder = b.priority ? priorityOrder[b.priority] : 3;
-          return aOrder - bOrder;
-        });
-      });
+      if (eventsResult.ok) {
+        setEvents(eventsResult.data);
+      }
 
-      setTasksByDate(grouped);
+      const failures = [
+        tasksResult.ok ? null : `Tasks: ${tasksResult.error || 'request failed'}`,
+        birthdaysResult.ok ? null : `Birthdays: ${birthdaysResult.error || 'request failed'}`,
+        eventsResult.ok ? null : `Events: ${eventsResult.error || 'request failed'}`,
+      ].filter((value): value is string => Boolean(value));
 
-      const birthdaysData = await parseApiResponse<any>(birthdaysRes);
-      setBirthdays(birthdaysRes.ok && Array.isArray(birthdaysData) ? birthdaysData as Birthday[] : []);
-
-      const eventsData = await parseApiResponse<any>(eventsRes);
-      setEvents(eventsRes.ok && Array.isArray(eventsData) ? eventsData as Event[] : []);
-    } catch (error) {
-      console.log('Error loading data', error);
-      setErrorMessage(
-        error instanceof Error && error.message
-          ? error.message
-          : 'Unable to load your tasks right now.'
-      );
+      setErrorMessage(failures.length > 0 ? failures.join('  ') : null);
     } finally {
-      clearTimeout(timeoutId);
       setLoadingTasks(false);
     }
-  }, [isAuthReady, userId]);
+  }, [isAuthReady, loadCollection, userId]);
 
   useFocusEffect(
     useCallback(() => {
