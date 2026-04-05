@@ -308,10 +308,10 @@ export default function AddEventScreen() {
               <Text style={styles.reminderLabel}>Remind me before:</Text>
               <View style={styles.reminderButtons}>
                 {[
+                  { label: '0 min', value: 0 },
                   { label: '15 min', value: 15 },
                   { label: '30 min', value: 30 },
                   { label: '1 hour', value: 60 },
-                  { label: '2 hours', value: 120 },
                 ].map((option) => (
                   <TouchableOpacity
                     key={option.value}

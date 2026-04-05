@@ -1,20 +1,18 @@
 import * as Notifications from 'expo-notifications';
 import * as Device from 'expo-device';
-import { Platform } from 'react-native';
+import { Platform, Alert } from 'react-native';
 import Constants, { ExecutionEnvironment } from 'expo-constants';
 
 const isExpoGo = Constants.executionEnvironment === ExecutionEnvironment.StoreClient;
 
-// Configure notification handling
-if (!isExpoGo || Platform.OS !== 'android') {
-  Notifications.setNotificationHandler({
-    handleNotification: async () => ({
-      shouldShowAlert: true,
-      shouldPlaySound: true,
-      shouldSetBadge: true,
-    }),
-  } as any);
-}
+// Configure notification handling to show alerts even when app is in foreground
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: true,
+    shouldSetBadge: true,
+  }),
+});
 
 /**
  * Request notification permissions and get the push token
@@ -179,6 +177,12 @@ export async function scheduleNotification(
     });
 
     console.log(`Notification scheduled: ${notificationId} for ${triggerDate.toLocaleString()}`);
+    
+    // Quick alert for testing feedback
+    if (__DEV__) {
+      Alert.alert('Notification Scheduled', `Reminder set for ${triggerDate.toLocaleTimeString()}`);
+    }
+    
     return notificationId;
   } catch (error) {
     console.error('Error scheduling notification:', error);
