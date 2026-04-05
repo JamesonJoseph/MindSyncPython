@@ -258,6 +258,24 @@ def _get_collections():
         database["avatar_conversations"]
     )
 
+def _get_mongo_health_snapshot() -> dict:
+    global _mongo_error
+    try:
+        client = _get_mongo_client()
+        client.admin.command("ping")
+        _mongo_error = None
+        return {
+            "connected": True,
+            "database": db_name,
+        }
+    except Exception as exc:
+        _mongo_error = str(exc)
+        return {
+            "connected": False,
+            "database": db_name,
+            "error": str(exc),
+        }
+
 def _ensure_indexes() -> None:
     database = _get_mongo_client()[db_name]
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
@@ -706,18 +724,31 @@ async def close_clients():
         await _gemini_http_client.aclose()
 
 @app.get("/health")
-def health_check():
-    return {"status": "ok"}
+async def health_check():
+    mongo = await asyncio.to_thread(_get_mongo_health_snapshot)
+    return {
+        "status": "ok" if mongo.get("connected") else "degraded",
+        "mongo": mongo,
+    }
 
 # ==================== JOURNALS ====================
 
 @app.get("/api/journals")
 async def get_journals(request: Request):
-    auth_info = await _require_auth(request)
-    uid = auth_info.get("uid")
-    journals, _, _, _, _, _, _, _, _, _ = _get_collections()
-    docs = list(journals.find({"userId": uid}).sort("date", DESCENDING))
-    return [_serialize_doc(doc) for doc in docs]
+    try:
+        auth_info = await _require_auth(request)
+        uid = auth_info.get("uid")
+        journals, _, _, _, _, _, _, _, _, _ = _get_collections()
+        docs = list(journals.find({"userId": uid}).sort("date", DESCENDING))
+        return [_serialize_doc(doc) for doc in docs]
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print("[journals] fetch failed:", exc)
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Failed to fetch journals", "detail": "Database query failed"},
+        )
 
 @app.get("/api/journals/search")
 async def search_journals(
@@ -814,11 +845,20 @@ def _parse_iso_datetime(raw_value: str | None) -> datetime | None:
 
 @app.get("/api/tasks")
 async def get_tasks(request: Request):
-    auth_info = await _require_auth(request)
-    uid = auth_info.get("uid")
-    _, _, tasks, _, _, _, _, _, _, _ = _get_collections()
-    docs = list(tasks.find({"userId": uid}).sort("event_datetime", ASCENDING))
-    return [_serialize_doc(doc) for doc in docs]
+    try:
+        auth_info = await _require_auth(request)
+        uid = auth_info.get("uid")
+        _, _, tasks, _, _, _, _, _, _, _ = _get_collections()
+        docs = list(tasks.find({"userId": uid}).sort("event_datetime", ASCENDING))
+        return [_serialize_doc(doc) for doc in docs]
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print("[tasks] fetch failed:", exc)
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Failed to fetch tasks", "detail": "Database query failed"},
+        )
 
 @app.post("/api/tasks")
 async def create_task(request: Request):

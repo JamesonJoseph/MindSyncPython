@@ -19,7 +19,7 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 
-let auth;
+let auth: any;
 if (Platform.OS === "web") {
   auth = getAuth(app);
 } else {

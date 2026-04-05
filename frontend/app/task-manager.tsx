@@ -10,14 +10,15 @@ import {
   Switch,
   Alert,
   FlatList,
+  ActivityIndicator,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import { auth } from '../firebaseConfig';
-import { getApiBaseUrl, authFetch } from '../utils/api';
+import { authFetch, parseApiResponse } from '../utils/api';
 import { toISTISOString } from '../utils/timezone';
 import { requestNotificationPermissions, scheduleTaskReminder, scheduleEventReminder, scheduleBirthdayReminder } from '../utils/notifications';
+import { useAuthSession } from '../utils/useAuthSession';
 
 // Types
 interface TaskItem {
@@ -48,10 +49,13 @@ const TYPE_ICONS = {
 export default function TaskManagerScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const userId = auth.currentUser?.uid || '';
+  const { user, isAuthReady } = useAuthSession();
+  const userId = user?.uid || '';
 
   // State
   const [tasks, setTasks] = useState<TaskItem[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [showAddMenu, setShowAddMenu] = useState(false);
   const [showFormModal, setShowFormModal] = useState(false);
   const [editingTask, setEditingTask] = useState<TaskItem | null>(null);
@@ -69,26 +73,51 @@ export default function TaskManagerScreen() {
 
   // Load tasks
   const loadTasks = useCallback(async () => {
+    if (!isAuthReady) {
+      return;
+    }
+
     if (!userId) {
       setTasks([]);
+      setErrorMessage('Sign in to load your tasks.');
+      setIsLoading(false);
       return;
     }
 
     try {
-      const res = await authFetch(`${getApiBaseUrl()}/api/tasks`);
-      if (res.ok) {
-        const data: TaskItem[] = await res.json();
-        setTasks(data);
+      setIsLoading(true);
+      setErrorMessage(null);
+
+      const res = await authFetch('/api/tasks');
+      const data = await parseApiResponse<any>(res);
+      if (!res.ok) {
+        const message =
+          typeof data?.error === 'string' ? data.error :
+          typeof data?.detail === 'string' ? data.detail :
+          'Failed to load tasks.';
+        throw new Error(message);
       }
+
+      setTasks(Array.isArray(data) ? data as TaskItem[] : []);
     } catch (error) {
       console.log('Error loading tasks:', error);
-      Alert.alert('Error', 'Failed to load tasks. Please check your connection.');
+      setErrorMessage(
+        error instanceof Error && error.message
+          ? error.message
+          : 'Failed to load tasks. Please check your connection.'
+      );
+    } finally {
+      setIsLoading(false);
     }
-  }, [userId]);
+  }, [isAuthReady, userId]);
 
   useEffect(() => {
-    loadTasks();
-  }, [loadTasks]);
+    if (!isAuthReady) {
+      return;
+    }
+
+    void loadTasks();
+  }, [isAuthReady, loadTasks]);
 
   // Open add menu
   const handleOpenMenu = () => {
@@ -180,13 +209,13 @@ export default function TaskManagerScreen() {
         if (userId) {
           let response;
           if (editingTask) {
-            response = await authFetch(`${getApiBaseUrl()}/api/tasks/${editingTask._id}`, {
+            response = await authFetch(`/api/tasks/${editingTask._id}`, {
               method: 'PUT',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify(newTask),
             });
           } else {
-            response = await authFetch(`${getApiBaseUrl()}/api/tasks`, {
+            response = await authFetch('/api/tasks', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify(newTask),
@@ -292,7 +321,7 @@ export default function TaskManagerScreen() {
           onPress: async () => {
             try {
               if (userId) {
-                await authFetch(`${getApiBaseUrl()}/api/tasks/${task._id}`, {
+                await authFetch(`/api/tasks/${task._id}`, {
                   method: 'DELETE',
                 });
               }
@@ -314,7 +343,7 @@ export default function TaskManagerScreen() {
 
     try {
       if (userId) {
-        await authFetch(`${getApiBaseUrl()}/api/tasks/${task._id}`, {
+        await authFetch(`/api/tasks/${task._id}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ status: newStatus }),
@@ -414,9 +443,25 @@ export default function TaskManagerScreen() {
         showsVerticalScrollIndicator={false}
         ListEmptyComponent={
           <View style={styles.emptyState}>
-            <Text style={styles.emptyIcon}>📭</Text>
-            <Text style={styles.emptyTitle}>No items yet</Text>
-            <Text style={styles.emptyText}>Tap the + button to add your first item</Text>
+            {isLoading ? (
+              <>
+                <ActivityIndicator size="large" color="#00E0C6" />
+                <Text style={styles.emptyTitle}>Loading tasks...</Text>
+              </>
+            ) : (
+              <>
+                <Text style={styles.emptyIcon}>{errorMessage ? '⚠️' : '📭'}</Text>
+                <Text style={styles.emptyTitle}>{errorMessage ? 'Could not load tasks' : 'No items yet'}</Text>
+                <Text style={styles.emptyText}>
+                  {errorMessage || 'Tap the + button to add your first item'}
+                </Text>
+                {errorMessage ? (
+                  <TouchableOpacity style={styles.retryButton} onPress={() => void loadTasks()}>
+                    <Text style={styles.retryButtonText}>Retry</Text>
+                  </TouchableOpacity>
+                ) : null}
+              </>
+            )}
           </View>
         }
         renderItem={({ item }) => (
@@ -756,6 +801,19 @@ const styles = StyleSheet.create({
   emptyText: {
     fontSize: 14,
     color: '#666',
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+  retryButton: {
+    marginTop: 16,
+    backgroundColor: '#00E0C6',
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    borderRadius: 999,
+  },
+  retryButtonText: {
+    color: '#0F172A',
+    fontWeight: '700',
   },
   taskCard: {
     backgroundColor: '#1E1E2E',

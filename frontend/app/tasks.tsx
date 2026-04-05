@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useCallback } from 'react';
 import {
   View,
   Text,
@@ -13,13 +13,12 @@ import {
   Alert,
   ScrollView,
 } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
-import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect } from 'expo-router';
-import { auth } from '../firebaseConfig';
-import { getApiBaseUrl } from '../utils/api';
+import { authFetch, parseApiResponse } from '../utils/api';
 import { fromISOToIST, toISTISOString, getISTDateString } from '../utils/timezone';
+import { useAuthSession } from '../utils/useAuthSession';
 
 type Task = {
   _id: string;
@@ -82,15 +81,17 @@ type PriorityOption = {
 export default function TasksScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const userId = auth.currentUser?.uid || '';
-  const userEmail = auth.currentUser?.email || '';
+  const { user, isAuthReady } = useAuthSession();
+  const userId = user?.uid || '';
+  const userEmail = user?.email || '';
   const rawName = userEmail.split('@')[0] || 'User';
   const userName = rawName.charAt(0).toUpperCase() + rawName.slice(1);
 
   const [currentDate, setCurrentDate] = useState(new Date());
   const [selectedDate, setSelectedDate] = useState(new Date());
   const [tasksByDate, setTasksByDate] = useState<Record<string, Task[]>>({});
-  const [loadingTasks, setLoadingTasks] = useState(false);
+  const [loadingTasks, setLoadingTasks] = useState(true);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [birthdays, setBirthdays] = useState<Birthday[]>([]);
   const [events, setEvents] = useState<Event[]>([]);
   
@@ -121,81 +122,94 @@ export default function TasksScreen() {
     return `${year}-${month}-${day}`;
   };
 
-  const loadData = async () => {
-    console.log('loadData called, userId:', userId);
-    if (!userId) return;
+  const loadData = useCallback(async () => {
+    if (!isAuthReady) {
+      return;
+    }
+
+    if (!userId) {
+      setTasksByDate({});
+      setBirthdays([]);
+      setEvents([]);
+      setErrorMessage('Sign in to load your tasks.');
+      setLoadingTasks(false);
+      return;
+    }
+
     setLoadingTasks(true);
+    setErrorMessage(null);
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
+
     try {
-      const { authFetch } = await import('../utils/api');
-      
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 15000);
-      
-      try {
-        const [tasksRes, birthdaysRes, eventsRes] = await Promise.all([
-          authFetch(`${getApiBaseUrl()}/api/tasks`, { signal: controller.signal }),
-          authFetch(`${getApiBaseUrl()}/api/birthdays`, { signal: controller.signal }),
-          authFetch(`${getApiBaseUrl()}/api/events`, { signal: controller.signal }),
-        ]);
-        
-        clearTimeout(timeoutId);
-        
-        console.log('Tasks response status:', tasksRes.status);
-        
-        if (tasksRes.ok) {
-          const tasks: Task[] = await tasksRes.json();
-          console.log('Tasks from API:', tasks);
-          const grouped: Record<string, Task[]> = {};
-          tasks.forEach(task => {
-            const dateStr = task.event_datetime || task.date;
-            const dateKey = getISTDateKey(dateStr);
-            console.log(`Task ${task.title}: dateStr=${dateStr}, dateKey=${dateKey}`);
-            if (!grouped[dateKey]) grouped[dateKey] = [];
-            grouped[dateKey].push(task);
-          });
-          Object.keys(grouped).forEach(key => {
-            grouped[key].sort((a, b) => {
-              const priorityOrder = { high: 0, medium: 1, low: 2 };
-              const aOrder = a.priority ? priorityOrder[a.priority] : 3;
-              const bOrder = b.priority ? priorityOrder[b.priority] : 3;
-              return aOrder - bOrder;
-            });
-          });
-          console.log('Tasks loaded:', tasks);
-          console.log('Grouped tasks:', grouped);
-          setTasksByDate(grouped);
-        } else {
-          console.log('Tasks fetch failed:', tasksRes.status, await tasksRes.text());
-        }
-        
-        if (birthdaysRes.ok) {
-          const bdays: Birthday[] = await birthdaysRes.json();
-          setBirthdays(bdays);
-        }
-        
-        if (eventsRes.ok) {
-          const evts: Event[] = await eventsRes.json();
-          setEvents(evts);
-        }
-      } catch (fetchError: any) {
-        clearTimeout(timeoutId);
-        console.log('Fetch error in loadData:', fetchError);
+      const [tasksRes, birthdaysRes, eventsRes] = await Promise.all([
+        authFetch('/api/tasks', { signal: controller.signal }),
+        authFetch('/api/birthdays', { signal: controller.signal }),
+        authFetch('/api/events', { signal: controller.signal }),
+      ]);
+
+      const tasksData = await parseApiResponse<any>(tasksRes);
+      if (!tasksRes.ok) {
+        const message =
+          typeof tasksData?.error === 'string' ? tasksData.error :
+          typeof tasksData?.detail === 'string' ? tasksData.detail :
+          'Failed to load tasks.';
+        throw new Error(message);
       }
+
+      const tasks = Array.isArray(tasksData) ? tasksData as Task[] : [];
+      const grouped: Record<string, Task[]> = {};
+      tasks.forEach((task) => {
+        const dateStr = task.event_datetime || task.date;
+        const dateKey = getISTDateKey(dateStr);
+        if (!dateKey) {
+          return;
+        }
+        if (!grouped[dateKey]) {
+          grouped[dateKey] = [];
+        }
+        grouped[dateKey].push(task);
+      });
+
+      Object.keys(grouped).forEach((key) => {
+        grouped[key].sort((a, b) => {
+          const priorityOrder = { high: 0, medium: 1, low: 2 };
+          const aOrder = a.priority ? priorityOrder[a.priority] : 3;
+          const bOrder = b.priority ? priorityOrder[b.priority] : 3;
+          return aOrder - bOrder;
+        });
+      });
+
+      setTasksByDate(grouped);
+
+      const birthdaysData = await parseApiResponse<any>(birthdaysRes);
+      setBirthdays(birthdaysRes.ok && Array.isArray(birthdaysData) ? birthdaysData as Birthday[] : []);
+
+      const eventsData = await parseApiResponse<any>(eventsRes);
+      setEvents(eventsRes.ok && Array.isArray(eventsData) ? eventsData as Event[] : []);
     } catch (error) {
       console.log('Error loading data', error);
+      setErrorMessage(
+        error instanceof Error && error.message
+          ? error.message
+          : 'Unable to load your tasks right now.'
+      );
     } finally {
+      clearTimeout(timeoutId);
       setLoadingTasks(false);
     }
-  };
+  }, [isAuthReady, userId]);
 
-   useFocusEffect(
-     useCallback(() => {
-       console.log('Tasks screen focused, userId:', userId);
-       if (userId) {
-         loadData();
-       }
-     }, [userId, selectedDate])
-   );
+  useFocusEffect(
+    useCallback(() => {
+      if (!isAuthReady) {
+        return;
+      }
+
+      void loadData();
+    }, [isAuthReady, loadData])
+  );
 
   const goToPreviousMonth = () => {
     setCurrentDate(prev => {
@@ -303,8 +317,7 @@ export default function TasksScreen() {
      
      // Send request to backend
      try {
-       const { authFetch } = await import('../utils/api');
-       const res = await authFetch(`${getApiBaseUrl()}/api/tasks`, {
+       const res = await authFetch('/api/tasks', {
          method: 'POST',
          headers: { 'Content-Type': 'application/json' },
          body: JSON.stringify({ 
@@ -379,8 +392,7 @@ export default function TasksScreen() {
      
      // Send request to backend
      try {
-       const { authFetch } = await import('../utils/api');
-       const res = await authFetch(`${getApiBaseUrl()}/api/tasks/${editingTask._id}`, {
+       const res = await authFetch(`/api/tasks/${editingTask._id}`, {
          method: 'PUT',
          headers: { 'Content-Type': 'application/json' },
          body: JSON.stringify({ 
@@ -427,8 +439,7 @@ export default function TasksScreen() {
              });
              
              try {
-               const { authFetch } = await import('../utils/api');
-               await authFetch(`${getApiBaseUrl()}/api/tasks/${task._id}`, {
+               await authFetch(`/api/tasks/${task._id}`, {
                  method: 'DELETE',
                });
              } catch (error) {
@@ -457,8 +468,7 @@ export default function TasksScreen() {
      });
      
      try {
-       const { authFetch } = await import('../utils/api');
-       await authFetch(`${getApiBaseUrl()}/api/tasks/${task._id}`, {
+       await authFetch(`/api/tasks/${task._id}`, {
          method: 'PUT',
          headers: { 'Content-Type': 'application/json' },
          body: JSON.stringify({ status: newStatus }),
@@ -477,15 +487,6 @@ export default function TasksScreen() {
     setTaskDescription(task.description || '');
     setTaskPriority(task.priority || 'medium');
     setTaskTime(task.time || '');
-    setShowTaskModal(true);
-  };
-
-  const openAddModal = () => {
-    setEditingTask(null);
-    setNewTaskTitle('');
-    setTaskDescription('');
-    setTaskPriority('medium');
-    setTaskTime('');
     setShowTaskModal(true);
   };
 
@@ -682,7 +683,7 @@ export default function TasksScreen() {
                   >
                     <Text style={styles.dateBirthdayIcon}>🎂</Text>
                     <View style={styles.dateBirthdayInfo}>
-                      <Text style={styles.dateBirthdayName}>{birthday.name}'s birthday</Text>
+                      <Text style={styles.dateBirthdayName}>{`${birthday.name}'s birthday`}</Text>
                       <Text style={styles.dateBirthdayRelation}>{birthday.relation}</Text>
                     </View>
                     <Ionicons name="chevron-forward" size={20} color="#999" />
@@ -711,10 +712,19 @@ export default function TasksScreen() {
             )}
 
             <View style={styles.tasksSection}>
-              <Text style={styles.sectionTitle}>🔥 Today's Focus</Text>
+              <Text style={styles.sectionTitle}>{"🔥 Today's Focus"}</Text>
               {loadingTasks && (
                 <View style={styles.loadingContainer}>
                   <ActivityIndicator size="small" color="#00E0C6" />
+                </View>
+              )}
+              {!loadingTasks && errorMessage && getSelectedDateTasks().length > 0 && (
+                <View style={styles.inlineMessageCard}>
+                  <Text style={styles.inlineMessageTitle}>Refresh failed</Text>
+                  <Text style={styles.inlineMessageText}>{errorMessage}</Text>
+                  <TouchableOpacity style={styles.inlineRetryButton} onPress={() => void loadData()}>
+                    <Text style={styles.inlineRetryButtonText}>Retry</Text>
+                  </TouchableOpacity>
                 </View>
               )}
             </View>
@@ -725,8 +735,15 @@ export default function TasksScreen() {
           !loadingTasks && getSelectedDateTasks().length === 0 ? (
             <View style={styles.emptyState}>
               <Text style={styles.emptyIcon}>🎉</Text>
-              <Text style={styles.emptyTitle}>Nothing planned</Text>
-              <Text style={styles.emptySubtitle}>Tap + to add a task, event, or birthday!</Text>
+              <Text style={styles.emptyTitle}>{errorMessage ? 'Could not load tasks' : 'Nothing planned'}</Text>
+              <Text style={styles.emptySubtitle}>
+                {errorMessage || 'Tap + to add a task, event, or birthday!'}
+              </Text>
+              {errorMessage ? (
+                <TouchableOpacity style={styles.inlineRetryButton} onPress={() => void loadData()}>
+                  <Text style={styles.inlineRetryButtonText}>Retry</Text>
+                </TouchableOpacity>
+              ) : null}
             </View>
           ) : null
         }
@@ -988,6 +1005,11 @@ const styles = StyleSheet.create({
   emptyIcon: { fontSize: 48, marginBottom: 12 },
   emptyTitle: { fontSize: 18, fontWeight: '600', color: '#333', marginBottom: 4 },
   emptySubtitle: { fontSize: 14, color: '#999' },
+  inlineMessageCard: { backgroundColor: '#FFF5F5', borderRadius: 12, borderWidth: 1, borderColor: '#FFD6D6', padding: 14 },
+  inlineMessageTitle: { fontSize: 14, fontWeight: '700', color: '#C0392B', marginBottom: 4 },
+  inlineMessageText: { fontSize: 13, color: '#7F2D2D', lineHeight: 18 },
+  inlineRetryButton: { alignSelf: 'center', marginTop: 12, backgroundColor: '#00E0C6', paddingHorizontal: 16, paddingVertical: 10, borderRadius: 999 },
+  inlineRetryButtonText: { color: '#fff', fontWeight: '600' },
   floatingAddButton: {
     position: 'absolute', right: 20, bottom: 100, width: 60, height: 60,
     borderRadius: 30, backgroundColor: '#00E0C6', justifyContent: 'center', alignItems: 'center',

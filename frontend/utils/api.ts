@@ -1,8 +1,12 @@
 import Constants from 'expo-constants';
+import { onAuthStateChanged } from 'firebase/auth';
 import { auth } from '../firebaseConfig';
 
 const API_PORT = '5000';
 const DEFAULT_REQUEST_TIMEOUT_MS = 15000;
+const AUTH_READY_TIMEOUT_MS = 2500;
+
+let authReadyPromise: Promise<void> | null = null;
 
 interface AuthFetchInit extends RequestInit {
   timeoutMs?: number;
@@ -78,6 +82,42 @@ function isNetworkError(error: unknown): boolean {
   );
 }
 
+async function waitForInitialAuthState(): Promise<void> {
+  if (auth.currentUser) {
+    return;
+  }
+
+  if (!authReadyPromise) {
+    authReadyPromise = new Promise((resolve) => {
+      let settled = false;
+      let unsubscribe = () => {};
+      let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+      const finish = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+        }
+        unsubscribe();
+        authReadyPromise = Promise.resolve();
+        resolve();
+      };
+
+      timeoutId = setTimeout(finish, AUTH_READY_TIMEOUT_MS);
+      const authUnsubscribe = onAuthStateChanged(auth, finish, finish);
+      unsubscribe = authUnsubscribe;
+      if (settled) {
+        authUnsubscribe();
+      }
+    });
+  }
+
+  await authReadyPromise;
+}
+
 // Helper that attaches Firebase ID token (if present) and default headers
 export async function authFetch(input: string, init: AuthFetchInit = {}) {
   const headers: Record<string, string> = {
@@ -85,6 +125,7 @@ export async function authFetch(input: string, init: AuthFetchInit = {}) {
   };
 
   try {
+    await waitForInitialAuthState();
     const user = auth.currentUser;
     if (user) {
       headers['X-User-Id'] = user.uid;

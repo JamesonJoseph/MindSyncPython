@@ -12,9 +12,9 @@ import {
 } from "react-native";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { useRouter, Stack } from "expo-router";
-import { auth } from "../firebaseConfig";
-import { getApiBaseUrl, parseApiResponse } from "../utils/api";
+import { useRouter, Stack, useFocusEffect } from "expo-router";
+import { authFetch, parseApiResponse } from "../utils/api";
+import { useAuthSession } from "../utils/useAuthSession";
 
 // --- Mock Heatmap Functions ---
 const generateMockHeatmapData = () => {
@@ -43,33 +43,49 @@ const getColorForIntensity = (intensity: number) => {
 const isTimeoutError = (error: unknown) =>
   error instanceof Error && /network request timed out/i.test(error.message);
 
+type JournalItem = {
+  id: string;
+  date: string;
+  title: string;
+  content: string;
+  analysis: string;
+};
+
 export default function JournalScreen() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [textExpandedIds, setTextExpandedIds] = useState<Record<string, boolean>>({}); 
-  const [journals, setJournals] = useState<any[]>([]);
+  const [textExpandedIds, setTextExpandedIds] = useState<Record<string, boolean>>({});
+  const [journals, setJournals] = useState<JournalItem[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const insets = useSafeAreaInsets();
   const router = useRouter();
+  const { user, isAuthReady } = useAuthSession();
   const heatmapData = useMemo(() => generateMockHeatmapData(), []);
   const screenWidth = Dimensions.get('window').width;
-  const squareSize = (screenWidth - 80) / 17; 
+  const squareSize = (screenWidth - 80) / 17;
 
-  const fetchJournals = async () => {
+  const fetchJournals = useCallback(async (isManualRefresh = false) => {
+    if (!isAuthReady) {
+      return;
+    }
+
+    if (!isManualRefresh) {
+      setLoading(true);
+    }
+
     try {
-      const user = auth.currentUser;
       if (!user) {
-        console.log("No user is logged in!");
-        setLoading(false);
+        setJournals([]);
+        setErrorMessage("Sign in to load your journals.");
         return;
       }
 
-      const apiUrl = getApiBaseUrl();
-      const { authFetch } = await import('../utils/api');
-      const response = await authFetch(`${apiUrl}/api/journals?userId=${user.uid}`);
+      setErrorMessage(null);
+      const response = await authFetch('/api/journals');
       const data: any = await parseApiResponse<any>(response);
-      
+
       if (!response.ok) {
         const message =
           typeof data?.error === "string" ? data.error :
@@ -91,19 +107,44 @@ export default function JournalScreen() {
         };
       });
       setJournals(formattedData);
+      setErrorMessage(null);
     } catch (error) {
       if (!isTimeoutError(error)) {
         console.warn("Fetch error:", error);
       }
-      setJournals([]);
+      setErrorMessage(
+        isTimeoutError(error)
+          ? "The request timed out. The server may still be waking up."
+          : error instanceof Error && error.message
+            ? error.message
+            : "Unable to load journals right now."
+      );
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  };
+  }, [isAuthReady, user]);
 
-  useEffect(() => { fetchJournals(); }, []);
-  const onRefresh = useCallback(() => { setRefreshing(true); fetchJournals(); }, []);
+  useFocusEffect(
+    useCallback(() => {
+      if (!isAuthReady) {
+        return;
+      }
+
+      void fetchJournals();
+    }, [fetchJournals, isAuthReady])
+  );
+
+  useEffect(() => {
+    if (!isAuthReady) {
+      setLoading(true);
+    }
+  }, [isAuthReady]);
+
+  const onRefresh = useCallback(() => {
+    setRefreshing(true);
+    void fetchJournals(true);
+  }, [fetchJournals]);
 
   // DELETE FUNCTION
   const handleDelete = (id: string) => {
@@ -114,33 +155,20 @@ export default function JournalScreen() {
         style: "destructive", 
         onPress: async () => {
           try {
-            const apiUrl = getApiBaseUrl();
-            const { authFetch } = await import('../utils/api');
-            await authFetch(`${apiUrl}/api/journals/${id}`, { method: "DELETE" });
-            fetchJournals(); 
-          } catch (_error) {
+            const response = await authFetch(`/api/journals/${id}`, { method: "DELETE" });
+            if (!response.ok) {
+              const data = await parseApiResponse<any>(response);
+              const message =
+                typeof data?.error === "string" ? data.error :
+                typeof data?.detail === "string" ? data.detail :
+                "Could not delete journal.";
+              throw new Error(message);
+            }
+            void fetchJournals();
+          } catch {
             Alert.alert("Error", "Could not delete journal.");
           }
-        } 
-      }
-    ]);
-  };
-
-  // SIGN OUT FUNCTION
-  const handleSignOut = () => {
-    Alert.alert("Sign Out", "Are you sure you want to log out?", [
-      { text: "Cancel", style: "cancel" },
-      { 
-        text: "Logout", 
-        style: "destructive", 
-        onPress: async () => {
-          try {
-            await auth.signOut();
-            router.replace('/'); 
-          } catch (_error) {
-            Alert.alert("Error", "Failed to sign out.");
-          }
-        } 
+        }
       }
     ]);
   };
@@ -173,12 +201,22 @@ export default function JournalScreen() {
         {loading ? (
           <View style={{ flex: 1, justifyContent: "center", alignItems: "center" }}><ActivityIndicator size="large" color="#00b894" /></View>
         ) : (
-          <ScrollView 
-            showsVerticalScrollIndicator={false} 
-            contentContainerStyle={{ paddingBottom: 180 }} 
+          <ScrollView
+            showsVerticalScrollIndicator={false}
+            contentContainerStyle={{ paddingBottom: 180 }}
             refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={["#00b894"]} />}
           >
-            {journals.length === 0 ? (
+            {errorMessage ? (
+              <View style={styles.messageCard}>
+                <Text style={styles.messageTitle}>{"Couldn't load journals"}</Text>
+                <Text style={styles.messageText}>{errorMessage}</Text>
+                {user ? (
+                  <TouchableOpacity style={styles.retryButton} onPress={() => void fetchJournals()}>
+                    <Text style={styles.retryButtonText}>Retry</Text>
+                  </TouchableOpacity>
+                ) : null}
+              </View>
+            ) : journals.length === 0 ? (
               <Text style={{ textAlign: 'center', color: '#999', marginTop: 20 }}>No journals yet. Click + to add one!</Text>
             ) : (
               journals.map((item) => {
@@ -319,6 +357,11 @@ const styles = StyleSheet.create({
   analysisButtonActive: { backgroundColor: "#00b894" },
   analysisText: { fontWeight: "600" },
   analysisBox: { backgroundColor: "#f1f2f6", padding: 15, borderRadius: 12, marginTop: 12 },
+  messageCard: { backgroundColor: "#fff5f5", borderRadius: 16, padding: 18, marginBottom: 18, borderWidth: 1, borderColor: "#ffd6d6" },
+  messageTitle: { fontSize: 16, fontWeight: "700", color: "#c0392b", marginBottom: 6 },
+  messageText: { color: "#7f2d2d", lineHeight: 20 },
+  retryButton: { alignSelf: "flex-start", marginTop: 12, paddingHorizontal: 14, paddingVertical: 10, borderRadius: 999, backgroundColor: "#00b894" },
+  retryButtonText: { color: "#fff", fontWeight: "600" },
   sentimentRow: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 8 },
   sentimentTitle: { fontWeight: "700" },
   analysisContent: { color: "#555", lineHeight: 18 },
