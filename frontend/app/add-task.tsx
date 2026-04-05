@@ -148,63 +148,36 @@ export default function AddTaskScreen() {
       const url = `${getApiBaseUrl()}/api/tasks`;
       console.log('POST to:', url);
 
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => {
-        controller.abort();
-        console.log('Request timed out after 30 seconds');
-      }, 30000);
+      const res = await authFetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(taskData),
+        timeoutMs: 60000,
+      });
+      
+      console.log('Response status:', res.status);
+      const responseData = await res.json().catch(() => null);
+      console.log('Response data:', responseData);
 
-      let savedSuccessfully = false;
-      let savedTaskId = null;
-
-      try {
-        const res = await authFetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(taskData),
-          signal: controller.signal,
-        });
-        
-        clearTimeout(timeoutId);
-        
-        console.log('Response status:', res.status);
-        const responseData = await res.json().catch(() => null);
-        console.log('Response data:', responseData);
-
-        if (res.ok) {
-          savedSuccessfully = true;
-          savedTaskId = responseData?._id;
-          
-          // Schedule reminder notification if enabled
-          if (enableReminder && savedTaskId) {
-            const taskDateTime = new Date(isoDate);
-            await scheduleTaskReminder(
-              savedTaskId,
-              title.trim(),
-              taskDateTime,
-              reminderMinutes
-            );
-          }
-        } else {
-          const errorMsg = responseData?.error || responseData?.detail || 'Failed to create task';
-          console.log('Server error:', errorMsg);
+      if (res.ok) {
+        // Schedule reminder notification if enabled
+        const savedTaskId = responseData?._id;
+        if (enableReminder && savedTaskId) {
+          const taskDateTime = new Date(isoDate);
+          await scheduleTaskReminder(
+            savedTaskId,
+            title.trim(),
+            taskDateTime,
+            reminderMinutes
+          );
         }
-      } catch (fetchError: any) {
-        clearTimeout(timeoutId);
-        console.log('Fetch error:', fetchError);
-        if (fetchError.name === 'AbortError') {
-          console.log('Request timed out - will save locally');
-        } else {
-          console.log('Network error - will save locally:', fetchError.message);
-        }
-      }
 
-      if (savedSuccessfully) {
         Alert.alert('Success', 'Task saved successfully!', [
           { text: 'OK', onPress: () => router.back() }
         ]);
       } else {
-        Alert.alert('Error', 'Failed to save task. Please try again.');
+        const errorMsg = responseData?.error || responseData?.detail || 'Failed to create task';
+        Alert.alert('Error', errorMsg);
       }
     } catch (error: any) {
       console.log('Error creating task:', error);

@@ -187,26 +187,40 @@ export default function DocsScreen() {
       const apiUrl = getApiBaseUrl();
       const safeName = (entry.fileName || `${entry.title}.pdf`).replace(/[^\w.\-]/g, '_');
       
-      // Use the new File API for SDK 54
       const file = new File(Directory.cache, safeName);
       const targetUrl = entry.url.startsWith('http')
         ? entry.url
         : `${apiUrl}${entry.url.startsWith('/') ? '' : '/'}${entry.url}`;
 
-      console.log('Downloading PDF using new File API from:', targetUrl);
+      console.log('[PDF] Downloading from:', targetUrl);
+      console.log('[PDF] Saving to:', file.uri);
       
-      await file.downloadAsync(targetUrl, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'X-User-Id': user.uid,
-          ...(user.email ? { 'X-User-Email': user.email } : {}),
-        },
-      });
-
-      return file.uri;
-    } catch (error) {
-      console.error('downloadPdfToCache error:', error);
-      Alert.alert('Download Failed', 'The server could not provide the file. It may still be waking up.');
+      try {
+        await file.downloadAsync(targetUrl, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'X-User-Id': user.uid,
+            ...(user.email ? { 'X-User-Email': user.email } : {}),
+          },
+        });
+        return file.uri;
+      } catch (downloadErr: any) {
+        console.error('[PDF] file.downloadAsync failed:', downloadErr);
+        // Fallback to legacy method if the new API fails on this specific device/version
+        console.log('[PDF] Attempting legacy fallback...');
+        const { downloadAsync, cacheDirectory } = await import('expo-file-system/legacy');
+        const legacyPath = `${cacheDirectory}${safeName}`;
+        const res = await downloadAsync(targetUrl, legacyPath, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'X-User-Id': user.uid,
+          }
+        });
+        return res.uri;
+      }
+    } catch (error: any) {
+      console.error('[PDF] downloadPdfToCache fatal error:', error);
+      Alert.alert('Download Failed', `Error: ${error.message || 'Unknown error'}. It may still be waking up.`);
       return null;
     }
   };
