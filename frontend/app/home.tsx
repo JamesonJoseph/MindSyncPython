@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import {
   View,
   Text,
@@ -6,6 +6,7 @@ import {
   TouchableOpacity,
   ScrollView,
   Alert,
+  InteractionManager,
 } from 'react-native';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -36,36 +37,9 @@ export default function HomeScreen() {
     if (!permission?.granted) {
       requestPermission();
     }
-  }, [permission]);
+  }, [permission, requestPermission]);
 
-  useEffect(() => {
-    checkAndRunAnalysis();
-  }, [permission]);
-
-  const checkAndRunAnalysis = async () => {
-    if (!permission?.granted || isAnalyzing || hasAnalyzed) return;
-
-    try {
-      const lastAnalyzed = await AsyncStorage.getItem(EMOTION_ANALYZED_KEY);
-      const today = new Date().toDateString();
-
-      if (lastAnalyzed === today) {
-        console.log('Emotion analysis already done today');
-        setHasAnalyzed(true);
-        return;
-      }
-
-      setIsAnalyzing(true);
-      await captureAndAnalyzeSecretly();
-      await AsyncStorage.setItem(EMOTION_ANALYZED_KEY, today);
-    } catch (error) {
-      console.log('Error checking analysis status:', error);
-    } finally {
-      setIsAnalyzing(false);
-    }
-  };
-
-  const captureAndAnalyzeSecretly = async () => {
+  const captureAndAnalyzeSecretly = useCallback(async () => {
     if (!cameraRef.current || isAnalyzing || hasAnalyzed) return;
     
     setHasAnalyzed(true);
@@ -90,7 +64,8 @@ export default function HomeScreen() {
         const response = await authFetch(`${apiUrl}/api/emotion`, {
           method: 'POST',
           body: formData,
-          timeoutMs: 30000,
+          timeoutMs: 12000,
+          slowThresholdMs: 1500,
         });
 
         if (response.ok) {
@@ -126,7 +101,40 @@ export default function HomeScreen() {
     } finally {
       setIsAnalyzing(false);
     }
-  };
+  }, [hasAnalyzed, isAnalyzing, userEmail, userId]);
+
+  const checkAndRunAnalysis = useCallback(async () => {
+    if (!permission?.granted || isAnalyzing || hasAnalyzed) return;
+
+    try {
+      const lastAnalyzed = await AsyncStorage.getItem(EMOTION_ANALYZED_KEY);
+      const today = new Date().toDateString();
+
+      if (lastAnalyzed === today) {
+        console.log('Emotion analysis already done today');
+        setHasAnalyzed(true);
+        return;
+      }
+
+      setIsAnalyzing(true);
+      await captureAndAnalyzeSecretly();
+      await AsyncStorage.setItem(EMOTION_ANALYZED_KEY, today);
+    } catch (error) {
+      console.log('Error checking analysis status:', error);
+    } finally {
+      setIsAnalyzing(false);
+    }
+  }, [captureAndAnalyzeSecretly, hasAnalyzed, isAnalyzing, permission?.granted]);
+
+  useEffect(() => {
+    const task = InteractionManager.runAfterInteractions(() => {
+      void checkAndRunAnalysis();
+    });
+
+    return () => {
+      task.cancel();
+    };
+  }, [checkAndRunAnalysis]);
 
   const handleSignOut = () => {
     Alert.alert("Sign Out", "Are you sure you want to log out?", [
@@ -138,7 +146,7 @@ export default function HomeScreen() {
           try {
             await auth.signOut();
             router.replace('/'); 
-          } catch (_error) {
+          } catch {
             Alert.alert("Error", "Failed to sign out.");
           }
         } 

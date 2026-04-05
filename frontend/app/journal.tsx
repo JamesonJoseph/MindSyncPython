@@ -7,14 +7,21 @@ import {
   ScrollView,
   Dimensions,
   RefreshControl,
-  ActivityIndicator,
   Alert
 } from "react-native";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useRouter, Stack, useFocusEffect } from "expo-router";
-import { authFetch, parseApiResponse } from "../utils/api";
+import {
+  authFetch,
+  extractApiErrorMessage,
+  getApiErrorMessage,
+  parseApiResponse,
+} from "../utils/api";
 import { useAuthSession } from "../utils/useAuthSession";
+import { useCancelableRequest } from "../utils/useCancelableRequest";
+import { readViewCache, writeViewCache } from "../utils/viewCache";
+import { CardListSkeleton } from "../components/LoadingSkeleton";
 
 // --- Mock Heatmap Functions ---
 const generateMockHeatmapData = () => {
@@ -40,8 +47,7 @@ const getColorForIntensity = (intensity: number) => {
   }
 };
 
-const isTimeoutError = (error: unknown) =>
-  error instanceof Error && /network request timed out/i.test(error.message);
+const JOURNAL_CACHE_PREFIX = "mindsync_journals_cache_v2";
 
 type JournalItem = {
   id: string;
@@ -58,15 +64,36 @@ export default function JournalScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [loading, setLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const { user, isAuthReady } = useAuthSession();
+  const { nextSignal, cancelActiveRequest } = useCancelableRequest();
   const heatmapData = useMemo(() => generateMockHeatmapData(), []);
   const screenWidth = Dimensions.get('window').width;
   const squareSize = (screenWidth - 80) / 17;
 
-  const fetchJournals = useCallback(async (isManualRefresh = false) => {
+  const cacheKey = user?.uid ? `${JOURNAL_CACHE_PREFIX}_${user.uid}` : null;
+
+  useEffect(() => {
+    const hydrateCache = async () => {
+      if (!cacheKey) {
+        setJournals([]);
+        return;
+      }
+
+      const cached = await readViewCache<JournalItem[]>(cacheKey);
+      if (cached?.data && Array.isArray(cached.data) && cached.data.length > 0) {
+        setJournals(cached.data);
+        setLoading(false);
+      }
+    };
+
+    void hydrateCache();
+  }, [cacheKey]);
+
+  const fetchJournals = useCallback(async (isManualRefresh = false, signal?: AbortSignal) => {
     if (!isAuthReady) {
       return;
     }
@@ -79,19 +106,23 @@ export default function JournalScreen() {
       if (!user) {
         setJournals([]);
         setErrorMessage("Sign in to load your journals.");
+        setStatusMessage(null);
         return;
       }
 
       setErrorMessage(null);
-      const response = await authFetch('/api/journals');
+      const response = await authFetch('/api/journals', {
+        signal,
+        timeoutMs: 12000,
+        slowThresholdMs: 900,
+        onSlow: () => {
+          setStatusMessage('Refreshing journals. The server may still be waking up.');
+        },
+      });
       const data: any = await parseApiResponse<any>(response);
 
       if (!response.ok) {
-        const message =
-          typeof data?.error === "string" ? data.error :
-          typeof data?.detail === "string" ? data.detail :
-          "Failed to fetch journals.";
-        throw new Error(message);
+        throw new Error(extractApiErrorMessage(data, "Failed to fetch journals."));
       }
 
       const items = Array.isArray(data) ? data : [];
@@ -108,22 +139,28 @@ export default function JournalScreen() {
       });
       setJournals(formattedData);
       setErrorMessage(null);
+      setStatusMessage(null);
+      if (cacheKey) {
+        await writeViewCache(cacheKey, formattedData);
+      }
     } catch (error) {
-      if (!isTimeoutError(error)) {
+      if (signal?.aborted) {
+        return;
+      }
+      if (!(error instanceof Error && error.message === 'The request was cancelled.')) {
         console.warn("Fetch error:", error);
       }
-      setErrorMessage(
-        isTimeoutError(error)
-          ? "The request timed out. The server may still be waking up."
-          : error instanceof Error && error.message
-            ? error.message
-            : "Unable to load journals right now."
-      );
+      setErrorMessage(getApiErrorMessage(error, "Unable to load journals right now."));
+      if (journals.length > 0) {
+        setStatusMessage('Showing your last loaded journals while the refresh retries.');
+      }
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (!signal?.aborted) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
-  }, [isAuthReady, user]);
+  }, [cacheKey, isAuthReady, journals.length, user]);
 
   useFocusEffect(
     useCallback(() => {
@@ -131,8 +168,13 @@ export default function JournalScreen() {
         return;
       }
 
-      void fetchJournals();
-    }, [fetchJournals, isAuthReady])
+      const signal = nextSignal();
+      void fetchJournals(false, signal);
+
+      return () => {
+        cancelActiveRequest();
+      };
+    }, [cancelActiveRequest, fetchJournals, isAuthReady, nextSignal])
   );
 
   useEffect(() => {
@@ -143,8 +185,9 @@ export default function JournalScreen() {
 
   const onRefresh = useCallback(() => {
     setRefreshing(true);
-    void fetchJournals(true);
-  }, [fetchJournals]);
+    const signal = nextSignal();
+    void fetchJournals(true, signal);
+  }, [fetchJournals, nextSignal]);
 
   // DELETE FUNCTION
   const handleDelete = (id: string) => {
@@ -198,14 +241,22 @@ export default function JournalScreen() {
           <Text style={styles.inactiveTab}>Mood map</Text>
         </View>
 
-        {loading ? (
-          <View style={{ flex: 1, justifyContent: "center", alignItems: "center" }}><ActivityIndicator size="large" color="#00b894" /></View>
+        {loading && journals.length === 0 ? (
+          <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 180 }}>
+            <CardListSkeleton count={3} cardHeight={204} />
+          </ScrollView>
         ) : (
           <ScrollView
             showsVerticalScrollIndicator={false}
             contentContainerStyle={{ paddingBottom: 180 }}
             refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={["#00b894"]} />}
           >
+            {statusMessage && !errorMessage ? (
+              <View style={styles.messageCard}>
+                <Text style={styles.messageTitle}>{"Still loading"}</Text>
+                <Text style={styles.messageText}>{statusMessage}</Text>
+              </View>
+            ) : null}
             {errorMessage ? (
               <View style={styles.messageCard}>
                 <Text style={styles.messageTitle}>{"Couldn't load journals"}</Text>

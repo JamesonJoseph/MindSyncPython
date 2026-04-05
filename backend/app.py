@@ -51,12 +51,13 @@ GEMINI_FALLBACK_MODELS = [
     ).split(",")
     if model.strip()
 ]
- 
+
 PORT = int(os.getenv("PORT", "5000"))
 DB_CONNECT_TIMEOUT_MS = int(os.getenv("DB_CONNECT_TIMEOUT_MS", "8000"))
 ANALYZE_TIMEOUT_SECONDS = float(os.getenv("ANALYZE_TIMEOUT_SECONDS", "12"))
 ANALYZE_CACHE_TTL_SECONDS = _env_int("ANALYZE_CACHE_TTL_SECONDS", 900)
 FAST_ANALYSIS_CHAR_LIMIT = _env_int("FAST_ANALYSIS_CHAR_LIMIT", 30)
+FAST_RESPONSE_CACHE_TTL_SECONDS = _env_int("FAST_RESPONSE_CACHE_TTL_SECONDS", 45)
 
 if not MONGO_URI:
     raise RuntimeError("MONGO_URI is required in environment variables.")
@@ -68,6 +69,7 @@ _mongo_client: MongoClient | None = None
 _mongo_error: str | None = None
 _gemini_http_client: httpx.AsyncClient | None = None
 _journal_analysis_cache: dict[str, tuple[float, str]] = {}
+_response_cache: dict[str, tuple[float, object]] = {}
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 EMOTION_LABELS = {"happy", "sad", "angry", "surprise", "neutral"}
 UPLOADS_DIR = Path(__file__).resolve().with_name("uploads")
@@ -124,7 +126,7 @@ async def _require_auth(request: Request) -> dict:
 
     id_token = parts[1]
     try:
-        decoded = firebase_auth.verify_id_token(id_token)
+        decoded = await asyncio.to_thread(firebase_auth.verify_id_token, id_token)
         return {"uid": decoded.get("uid"), "email": decoded.get("email")}
     except Exception as exc:
         print("[firebase] token verify failed:", exc)
@@ -237,7 +239,13 @@ def _get_mongo_client() -> MongoClient:
     global _mongo_error
     if _mongo_client is None:
         try:
-            _mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=DB_CONNECT_TIMEOUT_MS)
+            _mongo_client = MongoClient(
+                MONGO_URI,
+                serverSelectionTimeoutMS=DB_CONNECT_TIMEOUT_MS,
+                connectTimeoutMS=DB_CONNECT_TIMEOUT_MS,
+                socketTimeoutMS=max(DB_CONNECT_TIMEOUT_MS, 15000),
+                retryWrites=True,
+            )
             _mongo_error = None
         except Exception as exc:
             _mongo_error = str(exc)
@@ -280,9 +288,14 @@ def _ensure_indexes() -> None:
     database = _get_mongo_client()[db_name]
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     database["journals"].create_index([("userId", ASCENDING), ("date", DESCENDING)])
-    database["tasks"].create_index([("userId", ASCENDING), ("date", DESCENDING)])
+    database["tasks"].create_index([("userId", ASCENDING), ("event_datetime", ASCENDING)])
     database["chat_conversations"].create_index([("userId", ASCENDING), ("updatedAt", DESCENDING)])
     database["voice_analyses"].create_index([("userId", ASCENDING), ("date", DESCENDING)])
+    database["documents"].create_index([("userId", ASCENDING), ("date", DESCENDING)])
+    database["birthdays"].create_index([("userId", ASCENDING), ("monthDay", ASCENDING)])
+    database["events"].create_index([("userId", ASCENDING), ("date", ASCENDING)])
+    database["avatar_conversations"].create_index([("userId", ASCENDING), ("date", DESCENDING)])
+    database["users"].create_index([("userId", ASCENDING)], unique=True)
 
 def _normalize_analysis_content(content: str) -> str:
     return re.sub(r"\s+", " ", str(content or "").strip()).lower()
@@ -305,6 +318,37 @@ def _cache_journal_analysis(content: str, analysis: str) -> None:
     if not cache_key or not analysis:
         return
     _journal_analysis_cache[cache_key] = (time.time() + ANALYZE_CACHE_TTL_SECONDS, analysis)
+
+def _build_response_cache_prefix(resource: str, user_id: str) -> str:
+    return f"{resource}:{str(user_id or '').strip()}:"
+
+def _build_response_cache_key(resource: str, user_id: str, suffix: str = "default") -> str:
+    normalized_suffix = suffix or "default"
+    return f"{_build_response_cache_prefix(resource, user_id)}{normalized_suffix}"
+
+def _get_cached_response(cache_key: str):
+    cached = _response_cache.get(cache_key)
+    if not cached:
+        return None
+    expires_at, value = cached
+    if expires_at < time.time():
+        _response_cache.pop(cache_key, None)
+        return None
+    return value
+
+def _set_cached_response(cache_key: str, value, ttl_seconds: int = FAST_RESPONSE_CACHE_TTL_SECONDS):
+    if ttl_seconds <= 0:
+        return value
+    _response_cache[cache_key] = (time.time() + ttl_seconds, value)
+    return value
+
+def _invalidate_response_cache(*prefixes: str) -> None:
+    if not prefixes:
+        _response_cache.clear()
+        return
+    for cache_key in list(_response_cache.keys()):
+        if any(cache_key.startswith(prefix) for prefix in prefixes):
+            _response_cache.pop(cache_key, None)
 
 def _safe_filename(name: str) -> str:
     raw_name = Path(str(name or "document.pdf")).name
@@ -414,11 +458,16 @@ async def get_documents(request: Request):
     try:
         auth_info = await _require_auth(request)
         uid = auth_info.get("uid")
+        cache_key = _build_response_cache_key("documents", uid)
+        cached = _get_cached_response(cache_key)
+        if cached is not None:
+            return cached
         _, _, _, _, _, _, documents, _, _, _ = _get_collections()
         docs = await asyncio.to_thread(
             lambda: list(documents.find({"userId": uid}).sort("date", DESCENDING))
         )
-        return [_serialize_doc(doc) for doc in docs]
+        payload = [_serialize_doc(doc) for doc in docs]
+        return _set_cached_response(cache_key, payload)
     except HTTPException:
         raise
     except Exception as exc:
@@ -447,6 +496,7 @@ async def create_document(request: Request):
     }
     inserted = documents.insert_one(doc)
     created = documents.find_one({"_id": inserted.inserted_id})
+    _invalidate_response_cache(_build_response_cache_prefix("documents", uid))
     return JSONResponse(status_code=201, content=_serialize_doc(created))
 
 @app.post("/api/documents/upload-pdf")
@@ -516,6 +566,7 @@ async def update_document(doc_id: str, request: Request):
     if result.matched_count == 0:
         return JSONResponse(status_code=404, content={"error": "Document not found"})
     updated = documents.find_one({"_id": oid})
+    _invalidate_response_cache(_build_response_cache_prefix("documents", uid))
     return _serialize_doc(updated)
 
 
@@ -528,6 +579,7 @@ async def delete_document(doc_id: str, request: Request):
     result = documents.delete_one({"_id": oid, "userId": uid})
     if result.deleted_count == 0:
         return JSONResponse(status_code=404, content={"error": "Document not found"})
+    _invalidate_response_cache(_build_response_cache_prefix("documents", uid))
     return {"message": "Document deleted successfully"}
 
 def _get_gemini_http_client() -> httpx.AsyncClient:
@@ -654,7 +706,7 @@ async def _analyze_with_gemini(base64_image: str, mime_type: str) -> dict:
         "Details should be a short 1-sentence explanation based on visible cues like smile, eyebrows, eyes, jaw tension, or frown. "
         "If the face is blurry, obscured, or too small, then use neutral and say why."
     )
-    
+
     payload = {
         "contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": mime_type, "data": base64_image}}]}],
         "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"}
@@ -774,11 +826,16 @@ async def get_journals(request: Request):
     try:
         auth_info = await _require_auth(request)
         uid = auth_info.get("uid")
+        cache_key = _build_response_cache_key("journals", uid)
+        cached = _get_cached_response(cache_key)
+        if cached is not None:
+            return cached
         journals, _, _, _, _, _, _, _, _, _ = _get_collections()
         docs = await asyncio.to_thread(
             lambda: list(journals.find({"userId": uid}).sort("date", DESCENDING))
         )
-        return [_serialize_doc(doc) for doc in docs]
+        payload = [_serialize_doc(doc) for doc in docs]
+        return _set_cached_response(cache_key, payload)
     except HTTPException:
         raise
     except Exception as exc:
@@ -800,11 +857,23 @@ async def search_journals(
     try:
         auth_info = await _require_auth(request)
         uid = auth_info.get("uid")
+        cache_suffix = json.dumps(
+            {"startDate": startDate, "endDate": endDate, "q": q, "limit": limit, "sort": sort},
+            sort_keys=True,
+            default=str,
+        )
+        cache_key = _build_response_cache_key("journal-search", uid, cache_suffix)
+        cached = _get_cached_response(cache_key)
+        if cached is not None:
+            return cached
         query = _build_journal_query(user_id=uid, start_date=startDate, end_date=endDate, text_query=q)
         journals, _, _, _, _, _, _, _, _, _ = _get_collections()
         direction = ASCENDING if sort.lower() == "asc" else DESCENDING
-        docs = list(journals.find(query).sort("date", direction).limit(limit))
-        return [_serialize_doc(doc) for doc in docs]
+        docs = await asyncio.to_thread(
+            lambda: list(journals.find(query).sort("date", direction).limit(limit))
+        )
+        payload = [_serialize_doc(doc) for doc in docs]
+        return _set_cached_response(cache_key, payload)
     except HTTPException:
         raise
     except Exception:
@@ -828,6 +897,11 @@ async def create_journal(request: Request):
     created = journals.find_one({"_id": inserted.inserted_id})
     if not created:
         return JSONResponse(status_code=500, content={"error": "Failed to create journal"})
+    _invalidate_response_cache(
+        _build_response_cache_prefix("journals", auth_info.get("uid")),
+        _build_response_cache_prefix("journal-search", auth_info.get("uid")),
+        _build_response_cache_prefix("user-context", auth_info.get("uid")),
+    )
     return JSONResponse(status_code=201, content=_serialize_doc(created))
 
 @app.delete("/api/journals/{journal_id}")
@@ -840,6 +914,11 @@ async def delete_journal(journal_id: str, request: Request):
         result = journals.delete_one({"_id": oid, "userId": uid})
         if result.deleted_count == 0:
             return JSONResponse(status_code=404, content={"error": "Journal not found"})
+        _invalidate_response_cache(
+            _build_response_cache_prefix("journals", uid),
+            _build_response_cache_prefix("journal-search", uid),
+            _build_response_cache_prefix("user-context", uid),
+        )
         return {"message": "Journal deleted successfully"}
     except HTTPException:
         raise
@@ -862,6 +941,11 @@ async def update_journal(journal_id: str, request: Request):
         if result.matched_count == 0:
             return JSONResponse(status_code=404, content={"error": "Journal not found"})
         updated = journals.find_one({"_id": oid})
+        _invalidate_response_cache(
+            _build_response_cache_prefix("journals", uid),
+            _build_response_cache_prefix("journal-search", uid),
+            _build_response_cache_prefix("user-context", uid),
+        )
         return _serialize_doc(updated)
     except HTTPException:
         raise
@@ -886,11 +970,16 @@ async def get_tasks(request: Request):
     try:
         auth_info = await _require_auth(request)
         uid = auth_info.get("uid")
+        cache_key = _build_response_cache_key("tasks", uid)
+        cached = _get_cached_response(cache_key)
+        if cached is not None:
+            return cached
         _, _, tasks, _, _, _, _, _, _, _ = _get_collections()
         docs = await asyncio.to_thread(
             lambda: list(tasks.find({"userId": uid}).sort("event_datetime", ASCENDING))
         )
-        return [_serialize_doc(doc) for doc in docs]
+        payload = [_serialize_doc(doc) for doc in docs]
+        return _set_cached_response(cache_key, payload)
     except HTTPException:
         raise
     except Exception as exc:
@@ -932,6 +1021,10 @@ async def create_task(request: Request):
     created = tasks.find_one({"_id": inserted.inserted_id})
     if not created:
         return JSONResponse(status_code=500, content={"error": "Failed to create task"})
+    _invalidate_response_cache(
+        _build_response_cache_prefix("tasks", uid),
+        _build_response_cache_prefix("user-context", uid),
+    )
     return JSONResponse(status_code=201, content=_serialize_doc(created))
 
 @app.put("/api/tasks/{task_id}")
@@ -943,10 +1036,10 @@ async def update_task(task_id: str, request: Request):
         _, _, tasks, _, _, _, _, _, _, _ = _get_collections()
         oid = _parse_object_id(task_id)
         payload = await request.json()
-        
+
         # Parse datetime fields if provided
         updates = {}
-        
+
         if "title" in payload:
             updates["title"] = str(payload["title"])
         if "description" in payload:
@@ -963,13 +1056,13 @@ async def update_task(task_id: str, request: Request):
             updates["time"] = str(payload["time"])
         if "reminder_minutes" in payload:
             updates["reminder_minutes"] = int(payload["reminder_minutes"])
-        
+
         # Handle datetime updates
         if "event_datetime" in payload:
             dt = _parse_iso_datetime(payload["event_datetime"])
             if dt:
                 updates["event_datetime"] = dt
-        
+
         if "reminder_datetime" in payload:
             dt = _parse_iso_datetime(payload["reminder_datetime"])
             if dt:
@@ -980,18 +1073,22 @@ async def update_task(task_id: str, request: Request):
             event_dt = updates.get("event_datetime") or _parse_iso_datetime(payload.get("event_datetime"))
             if event_dt:
                 updates["reminder_datetime"] = event_dt - __import__('datetime').timedelta(minutes=reminder_minutes)
-        
+
         if not updates:
             return JSONResponse(status_code=400, content={"error": "No valid fields to update"})
-        
+
         result = tasks.update_one({"_id": oid, "userId": uid}, {"$set": updates})
-        
+
         if result.matched_count == 0:
             return JSONResponse(status_code=404, content={"error": "Task not found"})
-        
+
         updated = tasks.find_one({"_id": oid})
+        _invalidate_response_cache(
+            _build_response_cache_prefix("tasks", uid),
+            _build_response_cache_prefix("user-context", uid),
+        )
         return _serialize_doc(updated)
-    
+
     except HTTPException:
         raise
     except Exception as e:
@@ -1006,14 +1103,18 @@ async def delete_task(task_id: str, request: Request):
         uid = auth_info.get("uid")
         _, _, tasks, _, _, _, _, _, _, _ = _get_collections()
         oid = _parse_object_id(task_id)
-        
+
         result = tasks.delete_one({"_id": oid, "userId": uid})
-        
+
         if result.deleted_count == 0:
             return JSONResponse(status_code=404, content={"error": "Task not found"})
-        
+
+        _invalidate_response_cache(
+            _build_response_cache_prefix("tasks", uid),
+            _build_response_cache_prefix("user-context", uid),
+        )
         return {"message": "Task deleted successfully"}
-    
+
     except HTTPException:
         raise
     except Exception as e:
@@ -1028,9 +1129,14 @@ async def get_birthdays(request: Request):
     try:
         auth_info = await _require_auth(request)
         uid = auth_info.get("uid")
+        cache_key = _build_response_cache_key("birthdays", uid)
+        cached = _get_cached_response(cache_key)
+        if cached is not None:
+            return cached
         _, _, _, _, _, _, _, birthdays, _, _ = _get_collections()
         docs = await asyncio.to_thread(lambda: list(birthdays.find({"userId": uid})))
-        return [_serialize_doc(doc) for doc in docs]
+        payload = [_serialize_doc(doc) for doc in docs]
+        return _set_cached_response(cache_key, payload)
     except HTTPException:
         raise
     except Exception as exc:
@@ -1073,6 +1179,7 @@ async def create_birthday(request: Request):
     created = birthdays.find_one({"_id": inserted.inserted_id})
     if not created:
         return JSONResponse(status_code=500, content={"error": "Failed to create birthday"})
+    _invalidate_response_cache(_build_response_cache_prefix("birthdays", uid))
     return JSONResponse(status_code=201, content=_serialize_doc(created))
 
 @app.put("/api/birthdays/{birthday_id}")
@@ -1083,7 +1190,7 @@ async def update_birthday(birthday_id: str, request: Request):
         _, _, _, _, _, _, _, birthdays, _, _ = _get_collections()
         oid = _parse_object_id(birthday_id)
         payload = await request.json()
-        
+
         birthday_date = payload.get("date")
         if birthday_date:
             try:
@@ -1091,16 +1198,17 @@ async def update_birthday(birthday_id: str, request: Request):
                 payload["monthDay"] = f"{dt.month:02d}-{dt.day:02d}"
             except:
                 pass
-        
+
         allowed_fields = {"name", "date", "year", "relation", "color", "notifications", "monthDay"}
         updates = {k: v for k, v in payload.items() if k in allowed_fields}
-        
+
         if not updates:
             return JSONResponse(status_code=400, content={"error": "No valid fields to update"})
         result = birthdays.update_one({"_id": oid, "userId": uid}, {"$set": updates})
         if result.matched_count == 0:
             return JSONResponse(status_code=404, content={"error": "Birthday not found"})
         updated = birthdays.find_one({"_id": oid})
+        _invalidate_response_cache(_build_response_cache_prefix("birthdays", uid))
         return _serialize_doc(updated)
     except HTTPException:
         raise
@@ -1117,6 +1225,7 @@ async def delete_birthday(birthday_id: str, request: Request):
         result = birthdays.delete_one({"_id": oid, "userId": uid})
         if result.deleted_count == 0:
             return JSONResponse(status_code=404, content={"error": "Birthday not found"})
+        _invalidate_response_cache(_build_response_cache_prefix("birthdays", uid))
         return {"message": "Birthday deleted successfully"}
     except HTTPException:
         raise
@@ -1131,6 +1240,10 @@ async def get_events(request: Request, date: str | None = None):
     try:
         auth_info = await _require_auth(request)
         uid = auth_info.get("uid")
+        cache_key = _build_response_cache_key("events", uid, date or "all")
+        cached = _get_cached_response(cache_key)
+        if cached is not None:
+            return cached
         _, _, _, _, _, _, _, _, events, _ = _get_collections()
 
         query = {"userId": uid}
@@ -1144,7 +1257,8 @@ async def get_events(request: Request, date: str | None = None):
                 query["date"] = {"$regex": f"^{date}"}
 
         docs = await asyncio.to_thread(lambda: list(events.find(query).sort("date", ASCENDING)))
-        return [_serialize_doc(doc) for doc in docs]
+        payload = [_serialize_doc(doc) for doc in docs]
+        return _set_cached_response(cache_key, payload)
     except HTTPException:
         raise
     except Exception as exc:
@@ -1183,6 +1297,7 @@ async def create_event(request: Request):
     created = events.find_one({"_id": inserted.inserted_id})
     if not created:
         return JSONResponse(status_code=500, content={"error": "Failed to create event"})
+    _invalidate_response_cache(_build_response_cache_prefix("events", uid))
     return JSONResponse(status_code=201, content=_serialize_doc(created))
 
 @app.put("/api/events/{event_id}")
@@ -1193,23 +1308,24 @@ async def update_event(event_id: str, request: Request):
         _, _, _, _, _, _, _, _, events, _ = _get_collections()
         oid = _parse_object_id(event_id)
         payload = await request.json()
-        
+
         event_date = payload.get("date")
         if event_date:
             try:
                 payload["date"] = datetime.fromisoformat(event_date.replace("Z", "+00:00"))
             except:
                 del payload["date"]
-        
+
         allowed_fields = {"title", "description", "date", "time", "color"}
         updates = {k: v for k, v in payload.items() if k in allowed_fields}
-        
+
         if not updates:
             return JSONResponse(status_code=400, content={"error": "No valid fields to update"})
         result = events.update_one({"_id": oid, "userId": uid}, {"$set": updates})
         if result.matched_count == 0:
             return JSONResponse(status_code=404, content={"error": "Event not found"})
         updated = events.find_one({"_id": oid})
+        _invalidate_response_cache(_build_response_cache_prefix("events", uid))
         return _serialize_doc(updated)
     except HTTPException:
         raise
@@ -1226,6 +1342,7 @@ async def delete_event(event_id: str, request: Request):
         result = events.delete_one({"_id": oid, "userId": uid})
         if result.deleted_count == 0:
             return JSONResponse(status_code=404, content={"error": "Event not found"})
+        _invalidate_response_cache(_build_response_cache_prefix("events", uid))
         return {"message": "Event deleted successfully"}
     except HTTPException:
         raise
@@ -1329,7 +1446,7 @@ async def chat_agent(request: Request):
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
     email = auth_info.get("email")
-    
+
     payload = await request.json()
     messages = _normalize_chat_messages(payload.get("messages", []))
 
@@ -1547,6 +1664,10 @@ async def save_chat_conversation(request: Request):
         inserted = chat_conversations.insert_one(conversation_doc)
         final_conversation_id = str(inserted.inserted_id)
 
+    _invalidate_response_cache(
+        _build_response_cache_prefix("chat-conversations", uid),
+        _build_response_cache_prefix("chat-conversation", uid),
+    )
     saved_doc = chat_conversations.find_one({"_id": ObjectId(final_conversation_id)})
     return _serialize_conversation_detail(saved_doc or {"_id": final_conversation_id, **conversation_doc})
 
@@ -1557,9 +1678,16 @@ async def list_chat_conversations(
 ):
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
+    cache_key = _build_response_cache_key("chat-conversations", uid, str(limit))
+    cached = _get_cached_response(cache_key)
+    if cached is not None:
+        return cached
     _, _, _, _, _, chat_conversations, _, _, _, _ = _get_collections()
-    docs = list(chat_conversations.find({"userId": uid}).sort("updatedAt", DESCENDING).limit(limit))
-    return [_serialize_conversation_summary(doc) for doc in docs]
+    docs = await asyncio.to_thread(
+        lambda: list(chat_conversations.find({"userId": uid}).sort("updatedAt", DESCENDING).limit(limit))
+    )
+    payload = [_serialize_conversation_summary(doc) for doc in docs]
+    return _set_cached_response(cache_key, payload)
 
 @app.get("/api/chat/conversations/{conversation_id}")
 async def get_chat_conversation(conversation_id: str, request: Request):
@@ -1571,10 +1699,16 @@ async def get_chat_conversation(conversation_id: str, request: Request):
     except ValueError:
         return JSONResponse(status_code=400, content={"error": "Invalid conversation id"})
 
-    doc = chat_conversations.find_one({"_id": oid, "userId": uid})
+    cache_key = _build_response_cache_key("chat-conversation", uid, conversation_id)
+    cached = _get_cached_response(cache_key)
+    if cached is not None:
+        return cached
+
+    doc = await asyncio.to_thread(lambda: chat_conversations.find_one({"_id": oid, "userId": uid}))
     if not doc:
         return JSONResponse(status_code=404, content={"error": "Conversation not found"})
-    return _serialize_conversation_detail(doc)
+    payload = _serialize_conversation_detail(doc)
+    return _set_cached_response(cache_key, payload)
 
 @app.put("/api/chat/conversations/{conversation_id}")
 async def update_chat_conversation(conversation_id: str, request: Request):
@@ -1601,6 +1735,10 @@ async def update_chat_conversation(conversation_id: str, request: Request):
         return JSONResponse(status_code=404, content={"error": "Conversation not found"})
 
     updated = chat_conversations.find_one({"_id": oid, "userId": uid})
+    _invalidate_response_cache(
+        _build_response_cache_prefix("chat-conversations", uid),
+        _build_response_cache_prefix("chat-conversation", uid),
+    )
     return _serialize_conversation_detail(updated)
 
 @app.delete("/api/chat/conversations/{conversation_id}")
@@ -1616,6 +1754,10 @@ async def delete_chat_conversation(conversation_id: str, request: Request):
     result = chat_conversations.delete_one({"_id": oid, "userId": uid})
     if result.deleted_count == 0:
         return JSONResponse(status_code=404, content={"error": "Conversation not found"})
+    _invalidate_response_cache(
+        _build_response_cache_prefix("chat-conversations", uid),
+        _build_response_cache_prefix("chat-conversation", uid),
+    )
     return {"message": "Conversation deleted successfully"}
 
 @app.post("/api/avatar/chat")
@@ -1629,15 +1771,16 @@ async def avatar_chat_agent(request: Request):
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
     email = auth_info.get("email")
-    
+
     payload = await request.json()
     user_message = payload.get("message", "")
-    
+
     _, _, _, _, _, _, _, _, _, avatar_col = _get_collections()
-    history_cursor = avatar_col.find({"userId": uid}).sort("date", DESCENDING).limit(20)
-    history = list(history_cursor)
+    history = await asyncio.to_thread(
+        lambda: list(avatar_col.find({"userId": uid}).sort("date", DESCENDING).limit(20))
+    )
     history.reverse()
-    
+
     messages = []
     for h in history:
         messages.append({"role": "user", "content": h.get("user_query", "")})
@@ -1648,23 +1791,23 @@ async def avatar_chat_agent(request: Request):
     try:
         current_time_str = _utc_now().strftime("%A, %B %d, %Y at %H:%M UTC")
         system_msg = {
-            "role": "system", 
-            "content": f"""You are an empathetic, supportive, and active-listening AI companion. Your primary goal is to help the user navigate their emotions, reduce stress, and improve their overall well-being. 
+            "role": "system",
+            "content": f"""You are an empathetic, supportive, and active-listening AI companion. Your primary goal is to help the user navigate their emotions, reduce stress, and improve their overall well-being.
 
 Today is {current_time_str}.
 
 You have access to the user's past conversational history. Always use this context to provide personalized, consistent support.
 
 CRITICAL RULES AND CONSTRAINTS:
-1. NO DIAGNOSES: You are a supportive guide, not a licensed medical professional. Never diagnose the user with any medical or psychiatric condition (e.g., do not say "You have depression"). 
+1. NO DIAGNOSES: You are a supportive guide, not a licensed medical professional. Never diagnose the user with any medical or psychiatric condition (e.g., do not say "You have depression").
 2. VOICE-OPTIMIZED OUTPUT: Your responses will be spoken aloud by a Text-to-Speech engine. You MUST write in natural, spoken English. Do not use bullet points, numbered lists, emojis, asterisks, bolding, or markdown. Keep your sentences relatively short and conversational.
 3. CBT FRAMEWORK: When the user expresses negative emotions or stress, gently guide them using Cognitive Behavioral Therapy (CBT) techniques. Help them identify negative thought patterns (cognitive distortions) and guide them to reframe those thoughts into more balanced, realistic perspectives. Ask guiding questions rather than just giving advice.
-4. EARLY WARNING SYSTEM: If the user consistently expresses thoughts of severe hopelessness, extreme burnout, or danger to themselves, you must gently but clearly advise them to seek support from friends, family, or a professional human counselor. 
+4. EARLY WARNING SYSTEM: If the user consistently expresses thoughts of severe hopelessness, extreme burnout, or danger to themselves, you must gently but clearly advise them to seek support from friends, family, or a professional human counselor.
 5. CONVERSATIONAL CADENCE: Do not monologue. Respond with one or two concise thoughts, followed by a gentle, open-ended question to keep the user talking. Actively validate their feelings before offering a new perspective.
 
 Current Goal: Listen empathetically, validate the user's current emotional state, gracefully reference their past context if relevant, and gently guide them toward a positive, reframed mindset."""
         }
-        
+
         call_messages = [system_msg] + messages
         response = await asyncio.to_thread(
             groq_client.chat.completions.create,
@@ -1673,14 +1816,15 @@ Current Goal: Listen empathetically, validate the user's current emotional state
             max_tokens=4096
         )
         assistant_content = response.choices[0].message.content
-        
-        avatar_col.insert_one({
+
+        await asyncio.to_thread(avatar_col.insert_one, {
             "userId": uid,
             "userEmail": email,
             "user_query": user_message,
             "assistant_response": assistant_content,
             "date": _utc_now()
         })
+        _invalidate_response_cache(_build_response_cache_prefix("avatar-history", uid))
         return {"role": "assistant", "content": assistant_content}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": "Avatar chat failed"})
@@ -1691,13 +1835,19 @@ async def get_avatar_history(request: Request):
     """Fetch recent conversation history (Q&A pairs) for the user."""
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
+    cache_key = _build_response_cache_key("avatar-history", uid)
+    cached = _get_cached_response(cache_key)
+    if cached is not None:
+        return cached
     _, _, _, _, _, _, _, _, _, avatar_col = _get_collections()
-    
-    history_cursor = avatar_col.find({"userId": uid}).sort("date", DESCENDING).limit(50)
-    history = list(history_cursor)
+
+    history = await asyncio.to_thread(
+        lambda: list(avatar_col.find({"userId": uid}).sort("date", DESCENDING).limit(50))
+    )
     # history.reverse() # Frontend might want newest first for list
-    
-    return [_serialize_doc(h) for h in history]
+
+    payload = [_serialize_doc(h) for h in history]
+    return _set_cached_response(cache_key, payload)
 
 # ==================== AVATAR VOICE ANALYSIS ====================
 
@@ -1721,7 +1871,7 @@ async def analyze_voice(
         # If Firebase auth fails, use anonymous user
         uid = "anonymous"
         email = "anonymous@example.com"
-    
+
     try:
         audio_bytes = await audio.read()
         _log_voice_debug(
@@ -1792,22 +1942,23 @@ async def analyze_voice(
 
         # Get recent conversation history for context
         _, _, _, _, _, _, _, _, _, avatar_col = _get_collections()
-        history_cursor = avatar_col.find({"userId": uid}).sort("date", DESCENDING).limit(8)
-        history = list(history_cursor)
+        history = await asyncio.to_thread(
+            lambda: list(avatar_col.find({"userId": uid}).sort("date", DESCENDING).limit(8))
+        )
         history.reverse() # Oldest first for LLM
 
         current_time_str = _utc_now().strftime("%A, %B %d, %Y at %H:%M UTC")
-        system_content = f"""You are an empathetic, supportive, and active-listening AI companion. Your primary goal is to help the user navigate their emotions, reduce stress, and improve their overall well-being. 
+        system_content = f"""You are an empathetic, supportive, and active-listening AI companion. Your primary goal is to help the user navigate their emotions, reduce stress, and improve their overall well-being.
 
 Today is {current_time_str}.
 
 You have access to the user's past conversational history. Always use this context to provide personalized, consistent support.
 
 CRITICAL RULES AND CONSTRAINTS:
-1. NO DIAGNOSES: You are a supportive guide, not a licensed medical professional. Never diagnose the user with any medical or psychiatric condition (e.g., do not say "You have depression"). 
+1. NO DIAGNOSES: You are a supportive guide, not a licensed medical professional. Never diagnose the user with any medical or psychiatric condition (e.g., do not say "You have depression").
 2. VOICE-OPTIMIZED OUTPUT: Your responses will be spoken aloud by a Text-to-Speech engine. You MUST write in natural, spoken English. Do not use bullet points, numbered lists, emojis, asterisks, bolding, or markdown. Keep your sentences relatively short and conversational.
 3. CBT FRAMEWORK: When the user expresses negative emotions or stress, gently guide them using Cognitive Behavioral Therapy (CBT) techniques. Help them identify negative thought patterns (cognitive distortions) and guide them to reframe those thoughts into more balanced, realistic perspectives. Ask guiding questions rather than just giving advice.
-4. EARLY WARNING SYSTEM: If the user consistently expresses thoughts of severe hopelessness, extreme burnout, or danger to themselves, you must gently but clearly advise them to seek support from friends, family, or a professional human counselor. 
+4. EARLY WARNING SYSTEM: If the user consistently expresses thoughts of severe hopelessness, extreme burnout, or danger to themselves, you must gently but clearly advise them to seek support from friends, family, or a professional human counselor.
 5. CONVERSATIONAL CADENCE: Do not monologue. Respond with one or two concise thoughts, followed by a gentle, open-ended question to keep the user talking. Actively validate their feelings before offering a new perspective.
 
 Current Goal: Listen empathetically, validate the user's current emotional state, gracefully reference their past context if relevant, and gently guide them toward a positive, reframed mindset.
@@ -1816,7 +1967,7 @@ Output Format: Return strictly valid JSON with keys: emotion, confidence, sugges
 The 'emotion' field should be a single word (e.g., happy, joyful, sad, anxious, neutral). If the user is being positive or sharing good news, use 'happy' or 'joyful'."""
 
         messages = [{"role": "system", "content": system_content}]
-        
+
         for h in history:
             messages.append({"role": "user", "content": h.get("user_query", "")})
             messages.append({"role": "assistant", "content": h.get("assistant_response", "")})
@@ -1856,8 +2007,8 @@ The 'emotion' field should be a single word (e.g., happy, joyful, sad, anxious, 
             suggestions_text = result.get("suggestions", "")
             if isinstance(suggestions_text, list):
                 suggestions_text = ". ".join(suggestions_text)
-                
-            avatar_col.insert_one({
+
+            await asyncio.to_thread(avatar_col.insert_one, {
                 "userId": str(uid or ""),
                 "userEmail": email,
                 "user_query": transcript_text,
@@ -1877,7 +2028,11 @@ The 'emotion' field should be a single word (e.g., happy, joyful, sad, anxious, 
                 "earlyWarning": result.get("earlyWarning", ""),
                 "date": _utc_now(),
             }
-            voice_analyses_col.insert_one(voice_doc)
+            await asyncio.to_thread(voice_analyses_col.insert_one, voice_doc)
+            _invalidate_response_cache(
+                _build_response_cache_prefix("avatar-history", uid),
+                _build_response_cache_prefix("user-context", uid),
+            )
         except Exception as e:
             print(f"[avatar] db save failed: {e}")
 
@@ -1902,20 +2057,20 @@ async def text_to_speech(request: Request):
         payload = await request.json()
         text = payload.get("text", "")
         voice_id = payload.get("voice_id", DEFAULT_VOICE_ID)
-        
+
         if not text:
             return JSONResponse(status_code=400, content={"error": "Text is required"})
 
         if not CAMB_API_KEY:
             return JSONResponse(status_code=503, content={"error": "TTS service is not configured on the server."})
-        
+
         url = "https://client.camb.ai/apis/tts-stream"
-        
+
         headers = {
             "x-api-key": CAMB_API_KEY,
             "Content-Type": "application/json",
         }
-        
+
         payload_tts = {
             "text": text,
             "voice_id": voice_id,
@@ -1923,24 +2078,24 @@ async def text_to_speech(request: Request):
             "speech_model": "mars-flash",
             "output_configuration": {"format": "wav"},
         }
-        
+
         async with aiohttp.ClientSession() as session:
             async with session.post(url, headers=headers, json=payload_tts) as resp:
                 if resp.status != 200:
                     return JSONResponse(status_code=resp.status, content={"error": "TTS generation failed"})
-                
+
                 audio_data = b""
                 async for chunk in resp.content.iter_chunked(4096):
                     audio_data += chunk
-                
+
                 import base64
                 audio_base64 = base64.b64encode(audio_data).decode('utf-8')
-                
+
                 return {
                     "audio": audio_base64,
                     "format": "wav"
                 }
-                
+
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -1953,7 +2108,7 @@ async def early_warning_analysis(request: Request):
     try:
         payload = await request.json()
         user_id = payload.get("userId")
-        
+
         auth_info = await _require_auth(request)
         user_id = auth_info.get("uid")
         if not user_id:
@@ -1961,7 +2116,7 @@ async def early_warning_analysis(request: Request):
 
         # Get user data
         user_context = await _get_user_context(user_id)
-        
+
         # Analyze patterns using Groq
         system_prompt = """Analyze the user's recent patterns for early warning signs of mental health concerns.
 Consider: journal sentiment trends, task completion rates, sleep patterns, and voice analysis history.
@@ -2003,9 +2158,9 @@ Recent Tasks: {user_context.get('recent_tasks', 'No tasks')}"""
             max_tokens=300,
             response_format={"type": "json_object"}
         )
-        
+
         result_text = chat_completion.choices[0].message.content if chat_completion.choices else "{}"
-        
+
         try:
             result = json.loads(result_text)
         except json.JSONDecodeError:
@@ -2014,9 +2169,9 @@ Recent Tasks: {user_context.get('recent_tasks', 'No tasks')}"""
                 "message": "You're doing great! Keep up the good work.",
                 "recommendation": "Continue your current practices."
             }
-        
+
         return result
-        
+
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -2028,10 +2183,14 @@ async def get_user_profile(request: Request):
     """Get user profile data from onboarding."""
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
-    
+
     try:
+        cache_key = _build_response_cache_key("user-context", uid)
+        cached = _get_cached_response(cache_key)
+        if cached is not None:
+            return cached
         user_context = await _get_user_context(uid)
-        return user_context
+        return _set_cached_response(cache_key, user_context)
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"Failed to get profile: {str(e)}"})
 
@@ -2042,11 +2201,11 @@ async def update_user_profile(request: Request):
     auth_info = await _require_auth(request)
     uid = auth_info.get("uid")
     email = auth_info.get("email")
-    
+
     try:
         payload = await request.json()
         _, _, _, users_col, _, _, _, _, _, _ = _get_collections()
-        
+
         profile_data = {
             "userId": str(uid or ""),
             "userEmail": str(email or ""),
@@ -2056,13 +2215,13 @@ async def update_user_profile(request: Request):
             "activity": str(payload.get("activity", "")),
             "updatedAt": _utc_now(),
         }
-        
+
         users_col.update_one(
             {"userId": str(uid or "")},
             {"$set": profile_data},
             upsert=True
         )
-        
+        _invalidate_response_cache(_build_response_cache_prefix("user-context", uid))
         return {"message": "Profile updated successfully", "profile": profile_data}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"Failed to update profile: {str(e)}"})
@@ -2074,30 +2233,32 @@ async def _get_user_context(user_id: str) -> dict:
         journals, _, tasks, users_col, voice_analyses_col, _, _, _, _, _ = _get_collections()
 
         # Get recent journals
-        recent_journals = list(journals.find(
-            {"userId": user_id}
-        ).sort("date", DESCENDING).limit(5))
-        
+        recent_journals = await asyncio.to_thread(
+            lambda: list(journals.find({"userId": user_id}).sort("date", DESCENDING).limit(5))
+        )
+
         journal_texts = []
         for j in recent_journals:
             title = j.get('title', '')
             content = j.get('content', '')
             if title or content:
                 journal_texts.append(f"- {title}: {content}"[:200])
-        
+
         # Get recent tasks
-        recent_tasks = list(tasks.find(
-            {"userId": user_id}
-        ).sort("date", DESCENDING).limit(10))
-        
+        recent_tasks = await asyncio.to_thread(
+            lambda: list(tasks.find({"userId": user_id}).sort("event_datetime", DESCENDING).limit(10))
+        )
+
         task_summary = []
         for t in recent_tasks:
             status = t.get('status', 'pending')
             title = t.get('title', 'Untitled')
             task_summary.append(f"- {title} ({status})")
-        
+
         # attempt to read stored profile
-        stored_profile = users_col.find_one({"userId": user_id}) if users_col else None
+        stored_profile = await asyncio.to_thread(
+            lambda: users_col.find_one({"userId": user_id}) if users_col else None
+        )
 
         profile_name = stored_profile.get('name') if stored_profile else None
         occupation = stored_profile.get('occupation') if stored_profile else None
@@ -2105,7 +2266,9 @@ async def _get_user_context(user_id: str) -> dict:
         activity = stored_profile.get('activity') if stored_profile else None
 
         # recent voice analyses summary
-        recent_voice = list(voice_analyses_col.find({"userId": user_id}).sort("date", DESCENDING).limit(5)) if voice_analyses_col else []
+        recent_voice = await asyncio.to_thread(
+            lambda: list(voice_analyses_col.find({"userId": user_id}).sort("date", DESCENDING).limit(5)) if voice_analyses_col else []
+        )
         voice_summary = []
         for v in recent_voice:
             voice_summary.append(f"- {v.get('emotion', 'neutral')} ({v.get('confidence', 0)}%)")

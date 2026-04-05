@@ -16,9 +16,16 @@ import {
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect } from 'expo-router';
-import { authFetch, parseApiResponse } from '../utils/api';
+import {
+  authFetch,
+  extractApiErrorMessage,
+  parseApiResponse,
+} from '../utils/api';
 import { fromISOToIST, toISTISOString, getISTDateString } from '../utils/timezone';
 import { useAuthSession } from '../utils/useAuthSession';
+import { useCancelableRequest } from '../utils/useCancelableRequest';
+import { readViewCache, writeViewCache } from '../utils/viewCache';
+import { CalendarScreenSkeleton } from '../components/LoadingSkeleton';
 
 type Task = {
   _id: string;
@@ -57,6 +64,14 @@ type CollectionLoadResult<T> = {
   data: T[];
   error: string | null;
 };
+
+type TasksScreenCache = {
+  tasksByDate: Record<string, Task[]>;
+  birthdays: Birthday[];
+  events: Event[];
+};
+
+const TASKS_CACHE_PREFIX = 'mindsync_tasks_overview_v2';
 
 type PriorityOption = {
   value: Task['priority'];
@@ -98,6 +113,7 @@ export default function TasksScreen() {
   const [tasksByDate, setTasksByDate] = useState<Record<string, Task[]>>({});
   const [loadingTasks, setLoadingTasks] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [birthdays, setBirthdays] = useState<Birthday[]>([]);
   const [events, setEvents] = useState<Event[]>([]);
   
@@ -109,17 +125,45 @@ export default function TasksScreen() {
   const [showAddMenu, setShowAddMenu] = useState(false);
   const [taskTime, setTaskTime] = useState('');
   const [showTimePicker, setShowTimePicker] = useState(false);
+  const { nextSignal, cancelActiveRequest } = useCancelableRequest();
+  const cacheKey = userId ? `${TASKS_CACHE_PREFIX}_${userId}` : null;
 
-  const loadCollection = useCallback(async <T,>(path: string): Promise<CollectionLoadResult<T>> => {
+  React.useEffect(() => {
+    const hydrateCache = async () => {
+      if (!cacheKey) {
+        setTasksByDate({});
+        setBirthdays([]);
+        setEvents([]);
+        return;
+      }
+
+      const cached = await readViewCache<TasksScreenCache>(cacheKey);
+      if (!cached?.data) {
+        return;
+      }
+
+      setTasksByDate(cached.data.tasksByDate || {});
+      setBirthdays(Array.isArray(cached.data.birthdays) ? cached.data.birthdays : []);
+      setEvents(Array.isArray(cached.data.events) ? cached.data.events : []);
+      setLoadingTasks(false);
+    };
+
+    void hydrateCache();
+  }, [cacheKey]);
+
+  const loadCollection = useCallback(async <T,>(path: string, signal?: AbortSignal): Promise<CollectionLoadResult<T>> => {
     try {
-      const response = await authFetch(path, { timeoutMs: 45000 });
+      const response = await authFetch(path, {
+        signal,
+        timeoutMs: 12000,
+        slowThresholdMs: 900,
+        onSlow: () => {
+          setStatusMessage('Syncing your calendar. The server may still be waking up.');
+        },
+      });
       const payload = await parseApiResponse<any>(response);
       if (!response.ok) {
-        const message =
-          typeof payload?.error === 'string' ? payload.error :
-          typeof payload?.detail === 'string' ? payload.detail :
-          `Failed to load ${path}.`;
-        return { ok: false, data: [], error: message };
+        return { ok: false, data: [], error: extractApiErrorMessage(payload, `Failed to load ${path}.`) };
       }
 
       return {
@@ -157,7 +201,7 @@ export default function TasksScreen() {
     return `${year}-${month}-${day}`;
   };
 
-  const loadData = useCallback(async () => {
+  const loadData = useCallback(async (signal?: AbortSignal) => {
     if (!isAuthReady) {
       return;
     }
@@ -167,6 +211,7 @@ export default function TasksScreen() {
       setBirthdays([]);
       setEvents([]);
       setErrorMessage('Sign in to load your tasks.');
+      setStatusMessage(null);
       setLoadingTasks(false);
       return;
     }
@@ -176,11 +221,16 @@ export default function TasksScreen() {
 
     try {
       const [tasksResult, birthdaysResult, eventsResult] = await Promise.all([
-        loadCollection<Task>('/api/tasks'),
-        loadCollection<Birthday>('/api/birthdays'),
-        loadCollection<Event>('/api/events'),
+        loadCollection<Task>('/api/tasks', signal),
+        loadCollection<Birthday>('/api/birthdays', signal),
+        loadCollection<Event>('/api/events', signal),
       ]);
 
+      if (signal?.aborted) {
+        return;
+      }
+
+      let nextTasksByDate = tasksByDate;
       if (tasksResult.ok) {
         const grouped: Record<string, Task[]> = {};
         tasksResult.data.forEach((task) => {
@@ -204,14 +254,19 @@ export default function TasksScreen() {
           });
         });
 
+        nextTasksByDate = grouped;
         setTasksByDate(grouped);
       }
 
+      let nextBirthdays = birthdays;
       if (birthdaysResult.ok) {
+        nextBirthdays = birthdaysResult.data;
         setBirthdays(birthdaysResult.data);
       }
 
+      let nextEvents = events;
       if (eventsResult.ok) {
+        nextEvents = eventsResult.data;
         setEvents(eventsResult.data);
       }
 
@@ -222,10 +277,25 @@ export default function TasksScreen() {
       ].filter((value): value is string => Boolean(value));
 
       setErrorMessage(failures.length > 0 ? failures.join('  ') : null);
+      setStatusMessage(
+        failures.length > 0
+          ? 'Showing the latest data that finished loading.'
+          : null
+      );
+
+      if (cacheKey && (tasksResult.ok || birthdaysResult.ok || eventsResult.ok)) {
+        await writeViewCache(cacheKey, {
+          tasksByDate: nextTasksByDate,
+          birthdays: nextBirthdays,
+          events: nextEvents,
+        });
+      }
     } finally {
-      setLoadingTasks(false);
+      if (!signal?.aborted) {
+        setLoadingTasks(false);
+      }
     }
-  }, [isAuthReady, loadCollection, userId]);
+  }, [birthdays, cacheKey, events, isAuthReady, loadCollection, tasksByDate, userId]);
 
   useFocusEffect(
     useCallback(() => {
@@ -233,8 +303,13 @@ export default function TasksScreen() {
         return;
       }
 
-      void loadData();
-    }, [isAuthReady, loadData])
+      const signal = nextSignal();
+      void loadData(signal);
+
+      return () => {
+        cancelActiveRequest();
+      };
+    }, [cancelActiveRequest, isAuthReady, loadData, nextSignal])
   );
 
   const goToPreviousMonth = () => {
@@ -574,6 +649,14 @@ export default function TasksScreen() {
         </TouchableOpacity>
       </View>
 
+      {loadingTasks && getAllLoadedTaskCount() === 0 && birthdays.length === 0 && events.length === 0 ? (
+        <ScrollView
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={[styles.taskListContent, { paddingBottom: 120 }]}
+        >
+          <CalendarScreenSkeleton />
+        </ScrollView>
+      ) : (
       <FlatList
         data={getSelectedDateTasks()}
         keyExtractor={item => item._id}
@@ -759,6 +842,12 @@ export default function TasksScreen() {
                   <Text style={styles.viewAllText}>View All</Text>
                 </TouchableOpacity>
               </View>
+              {statusMessage ? (
+                <View style={styles.inlineMessageCard}>
+                  <Text style={styles.inlineMessageTitle}>Still syncing</Text>
+                  <Text style={styles.inlineMessageText}>{statusMessage}</Text>
+                </View>
+              ) : null}
               {loadingTasks && (
                 <View style={styles.loadingContainer}>
                   <ActivityIndicator size="small" color="#00E0C6" />
@@ -800,6 +889,7 @@ export default function TasksScreen() {
         contentContainerStyle={styles.taskListContent}
         showsVerticalScrollIndicator={false}
       />
+      )}
 
       <TouchableOpacity 
         style={[styles.floatingAddButton, { bottom: Math.max(insets.bottom, 10) + 90 }]}

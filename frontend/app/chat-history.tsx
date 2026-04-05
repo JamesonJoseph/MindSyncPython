@@ -13,9 +13,16 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
+import { useRouter, useFocusEffect } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { getApiBaseUrl, parseApiResponse } from '../utils/api';
+import {
+  authFetch,
+  extractApiErrorMessage,
+  getApiErrorMessage,
+  parseApiResponse,
+} from '../utils/api';
+import { useCancelableRequest } from '../utils/useCancelableRequest';
+import { CardListSkeleton } from '../components/LoadingSkeleton';
 
 type ConversationSummary = {
   _id: string;
@@ -52,20 +59,22 @@ export default function ChatHistoryScreen() {
   const [editTitle, setEditTitle] = useState('');
   const [savingEdit, setSavingEdit] = useState(false);
   const [screenMessage, setScreenMessage] = useState('');
+  const { nextSignal, cancelActiveRequest } = useCancelableRequest();
 
-  const loadConversations = useCallback(async () => {
+  const loadConversations = useCallback(async (signal?: AbortSignal) => {
     try {
-      const apiUrl = getApiBaseUrl();
-      const { authFetch } = await import('../utils/api');
-      const response = await authFetch(`${apiUrl}/api/chat/conversations`);
+      const response = await authFetch('/api/chat/conversations', {
+        signal,
+        timeoutMs: 12000,
+        slowThresholdMs: 900,
+        onSlow: () => {
+          setScreenMessage('Refreshing saved chats. The server may still be waking up.');
+        },
+      });
       const data: any = await parseApiResponse<any>(response);
 
       if (!response.ok) {
-        const message =
-          typeof data?.error === 'string' ? data.error :
-          typeof data?.detail === 'string' ? data.detail :
-          'Failed to load saved conversations.';
-        throw new Error(message);
+        throw new Error(extractApiErrorMessage(data, 'Failed to load saved conversations.'));
       }
 
       const items = Array.isArray(data) ? data : [];
@@ -73,6 +82,9 @@ export default function ChatHistoryScreen() {
       setScreenMessage('');
       await AsyncStorage.setItem(CHAT_HISTORY_CACHE_KEY, JSON.stringify(items));
     } catch (error) {
+      if (signal?.aborted) {
+        return;
+      }
       if (!isTimeoutError(error)) {
         console.warn('Failed to load saved conversations', error);
       }
@@ -80,11 +92,13 @@ export default function ChatHistoryScreen() {
         setScreenMessage('Showing cached saved chats. Refresh when the connection is stable.');
       }
       if (conversations.length === 0) {
-        setScreenMessage(error instanceof Error ? error.message : 'Failed to load saved conversations.');
+        setScreenMessage(getApiErrorMessage(error, 'Failed to load saved conversations.'));
       }
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (!signal?.aborted) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
   }, [conversations.length]);
 
@@ -103,11 +117,23 @@ export default function ChatHistoryScreen() {
         console.warn('Failed to hydrate chat history cache', error);
       }
 
-      loadConversations();
+      const signal = nextSignal();
+      void loadConversations(signal);
     };
 
-    hydrateCacheAndLoad();
-  }, [loadConversations]);
+    void hydrateCacheAndLoad();
+  }, [loadConversations, nextSignal]);
+
+  useFocusEffect(
+    useCallback(() => {
+      const signal = nextSignal();
+      void loadConversations(signal);
+
+      return () => {
+        cancelActiveRequest();
+      };
+    }, [cancelActiveRequest, loadConversations, nextSignal])
+  );
 
   const normalizedQuery = searchQuery.trim().toLowerCase();
   const filteredConversations = conversations.filter(item => {
@@ -138,18 +164,12 @@ export default function ChatHistoryScreen() {
           style: 'destructive',
           onPress: async () => {
             try {
-              const apiUrl = getApiBaseUrl();
-              const { authFetch } = await import('../utils/api');
-              const response = await authFetch(`${apiUrl}/api/chat/conversations/${item._id}`, {
+              const response = await authFetch(`/api/chat/conversations/${item._id}`, {
                 method: 'DELETE',
               });
               const data = await parseApiResponse<any>(response);
               if (!response.ok) {
-                const message =
-                  typeof data?.error === 'string' ? data.error :
-                  typeof data?.detail === 'string' ? data.detail :
-                  'Failed to delete conversation.';
-                throw new Error(message);
+                throw new Error(extractApiErrorMessage(data, 'Failed to delete conversation.'));
               }
               setConversations(prev => {
                 const next = prev.filter(conversation => conversation._id !== item._id);
@@ -180,20 +200,14 @@ export default function ChatHistoryScreen() {
 
     setSavingEdit(true);
     try {
-      const apiUrl = getApiBaseUrl();
-      const { authFetch } = await import('../utils/api');
-      const response = await authFetch(`${apiUrl}/api/chat/conversations/${editingItem._id}`, {
+      const response = await authFetch(`/api/chat/conversations/${editingItem._id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ title }),
       });
       const data = await parseApiResponse<any>(response);
       if (!response.ok) {
-        const message =
-          typeof data?.error === 'string' ? data.error :
-          typeof data?.detail === 'string' ? data.detail :
-          'Failed to update conversation.';
-        throw new Error(message);
+        throw new Error(extractApiErrorMessage(data, 'Failed to update conversation.'));
       }
 
       setConversations(prev =>
@@ -320,9 +334,9 @@ export default function ChatHistoryScreen() {
         </View>
       )}
 
-      {loading ? (
-        <View style={styles.centered}>
-          <ActivityIndicator size="large" color="#00E0C6" />
+      {loading && conversations.length === 0 ? (
+        <View style={styles.skeletonWrap}>
+          <CardListSkeleton count={4} cardHeight={150} />
         </View>
       ) : filteredConversations.length === 0 ? (
         <View style={styles.centered}>
@@ -347,7 +361,8 @@ export default function ChatHistoryScreen() {
               refreshing={refreshing}
               onRefresh={() => {
                 setRefreshing(true);
-                loadConversations();
+                const signal = nextSignal();
+                void loadConversations(signal);
               }}
               colors={['#00E0C6']}
             />
@@ -414,6 +429,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingHorizontal: 30,
     gap: 10,
+  },
+  skeletonWrap: {
+    paddingHorizontal: 16,
+    paddingTop: 12,
   },
   emptyTitle: {
     fontSize: 18,

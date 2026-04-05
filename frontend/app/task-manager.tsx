@@ -10,15 +10,22 @@ import {
   Switch,
   Alert,
   FlatList,
-  ActivityIndicator,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect } from 'expo-router';
-import { authFetch, parseApiResponse } from '../utils/api';
+import {
+  authFetch,
+  extractApiErrorMessage,
+  getApiErrorMessage,
+  parseApiResponse,
+} from '../utils/api';
 import { getISTDateString, toISTISOString } from '../utils/timezone';
 import { requestNotificationPermissions, scheduleTaskReminder, scheduleEventReminder, scheduleBirthdayReminder } from '../utils/notifications';
 import { useAuthSession } from '../utils/useAuthSession';
+import { useCancelableRequest } from '../utils/useCancelableRequest';
+import { readViewCache, writeViewCache } from '../utils/viewCache';
+import { CardListSkeleton } from '../components/LoadingSkeleton';
 
 // Types
 interface TaskItem {
@@ -77,6 +84,8 @@ type CollectionLoadResult<T> = {
   error: string | null;
 };
 
+const TASK_MANAGER_CACHE_PREFIX = 'mindsync_task_manager_v2';
+
 const TYPE_COLORS = {
   event: '#FF9500',
   task: '#00E0C6',
@@ -99,6 +108,7 @@ export default function TaskManagerScreen() {
   const [tasks, setTasks] = useState<TaskItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [showAddMenu, setShowAddMenu] = useState(false);
   const [showFormModal, setShowFormModal] = useState(false);
   const [editingTask, setEditingTask] = useState<TaskItem | null>(null);
@@ -113,17 +123,39 @@ export default function TaskManagerScreen() {
   const [formReminder, setFormReminder] = useState(30);
   const [showCustomReminder, setShowCustomReminder] = useState(false);
   const [customReminderValue, setCustomReminderValue] = useState('');
+  const { nextSignal, cancelActiveRequest } = useCancelableRequest();
+  const cacheKey = userId ? `${TASK_MANAGER_CACHE_PREFIX}_${userId}` : null;
 
-  const loadCollection = useCallback(async <T,>(path: string): Promise<CollectionLoadResult<T>> => {
+  React.useEffect(() => {
+    const hydrateCache = async () => {
+      if (!cacheKey) {
+        setTasks([]);
+        return;
+      }
+
+      const cached = await readViewCache<TaskItem[]>(cacheKey);
+      if (cached?.data && Array.isArray(cached.data) && cached.data.length > 0) {
+        setTasks(cached.data);
+        setIsLoading(false);
+      }
+    };
+
+    void hydrateCache();
+  }, [cacheKey]);
+
+  const loadCollection = useCallback(async <T,>(path: string, signal?: AbortSignal): Promise<CollectionLoadResult<T>> => {
     try {
-      const response = await authFetch(path, { timeoutMs: 45000 });
+      const response = await authFetch(path, {
+        signal,
+        timeoutMs: 12000,
+        slowThresholdMs: 900,
+        onSlow: () => {
+          setStatusMessage('Syncing tasks, events, and birthdays. The server may still be waking up.');
+        },
+      });
       const payload = await parseApiResponse<any>(response);
       if (!response.ok) {
-        const message =
-          typeof payload?.error === 'string' ? payload.error :
-          typeof payload?.detail === 'string' ? payload.detail :
-          `Failed to load ${path}.`;
-        return { ok: false, data: [], error: message };
+        return { ok: false, data: [], error: extractApiErrorMessage(payload, `Failed to load ${path}.`) };
       }
 
       return {
@@ -154,7 +186,7 @@ export default function TaskManagerScreen() {
   }, []);
 
   // Load tasks
-  const loadTasks = useCallback(async () => {
+  const loadTasks = useCallback(async (signal?: AbortSignal) => {
     if (!isAuthReady) {
       return;
     }
@@ -162,6 +194,7 @@ export default function TaskManagerScreen() {
     if (!userId) {
       setTasks([]);
       setErrorMessage('Sign in to load your tasks.');
+      setStatusMessage(null);
       setIsLoading(false);
       return;
     }
@@ -171,10 +204,14 @@ export default function TaskManagerScreen() {
       setErrorMessage(null);
 
       const [tasksResult, eventsResult, birthdaysResult] = await Promise.all([
-        loadCollection<TaskRecord>('/api/tasks'),
-        loadCollection<EventRecord>('/api/events'),
-        loadCollection<BirthdayRecord>('/api/birthdays'),
+        loadCollection<TaskRecord>('/api/tasks', signal),
+        loadCollection<EventRecord>('/api/events', signal),
+        loadCollection<BirthdayRecord>('/api/birthdays', signal),
       ]);
+
+      if (signal?.aborted) {
+        return;
+      }
 
       const normalizedTasks: TaskItem[] = tasksResult.data
         .filter((item) => Boolean(item._id) && Boolean(item.event_datetime || item.date))
@@ -233,6 +270,9 @@ export default function TaskManagerScreen() {
 
       if (tasksResult.ok || eventsResult.ok || birthdaysResult.ok) {
         setTasks(mergedItems);
+        if (cacheKey) {
+          await writeViewCache(cacheKey, mergedItems);
+        }
       }
 
       const failures = [
@@ -242,10 +282,25 @@ export default function TaskManagerScreen() {
       ].filter((value): value is string => Boolean(value));
 
       setErrorMessage(failures.length > 0 ? failures.join('  ') : null);
+      setStatusMessage(
+        failures.length > 0
+          ? 'Showing the latest items that finished loading.'
+          : null
+      );
+    } catch (error) {
+      if (signal?.aborted) {
+        return;
+      }
+      setErrorMessage(getApiErrorMessage(error, 'Failed to load tasks. Please check your connection.'));
+      if (tasks.length > 0) {
+        setStatusMessage('Showing your last loaded items while the refresh retries.');
+      }
     } finally {
-      setIsLoading(false);
+      if (!signal?.aborted) {
+        setIsLoading(false);
+      }
     }
-  }, [isAuthReady, loadCollection, normalizeBirthdayDate, userId]);
+  }, [cacheKey, isAuthReady, loadCollection, normalizeBirthdayDate, tasks.length, userId]);
 
   useFocusEffect(
     useCallback(() => {
@@ -253,8 +308,13 @@ export default function TaskManagerScreen() {
         return;
       }
 
-      void loadTasks();
-    }, [isAuthReady, loadTasks])
+      const signal = nextSignal();
+      void loadTasks(signal);
+
+      return () => {
+        cancelActiveRequest();
+      };
+    }, [cancelActiveRequest, isAuthReady, loadTasks, nextSignal])
   );
 
   // Open add menu
@@ -620,11 +680,10 @@ export default function TaskManagerScreen() {
         showsVerticalScrollIndicator={false}
         ListEmptyComponent={
           <View style={styles.emptyState}>
-            {isLoading ? (
-              <>
-                <ActivityIndicator size="large" color="#00E0C6" />
-                <Text style={styles.emptyTitle}>Loading tasks...</Text>
-              </>
+            {isLoading && filteredTasks.length === 0 ? (
+              <View style={{ width: '100%' }}>
+                <CardListSkeleton count={3} cardHeight={122} />
+              </View>
             ) : (
               <>
                 <Text style={styles.emptyIcon}>{errorMessage ? '⚠️' : '📭'}</Text>
@@ -632,6 +691,9 @@ export default function TaskManagerScreen() {
                 <Text style={styles.emptyText}>
                   {errorMessage || 'Tap the + button to add your first item'}
                 </Text>
+                {statusMessage && !errorMessage ? (
+                  <Text style={styles.emptyText}>{statusMessage}</Text>
+                ) : null}
                 {errorMessage ? (
                   <TouchableOpacity style={styles.retryButton} onPress={() => void loadTasks()}>
                     <Text style={styles.retryButtonText}>Retry</Text>
