@@ -1,5 +1,5 @@
 {
-  "name": "mindsync_app",
+  "name": "mindsync",
   "main": "expo-router/entry",
   "version": "1.0.0",
   "scripts": {

@@ -321,7 +321,21 @@ export default function ChatScreen() {
         body: JSON.stringify({
           messages: apiMessages,
         }),
+        slowThresholdMs: 3000,
+        onSlow: () => {
+          setMessages(prev => [
+            ...prev,
+            {
+              id: 'thinking-slow',
+              role: 'assistant',
+              content: 'Still thinking... the server might be a bit slow today.'
+            }
+          ]);
+        }
       });
+
+      // Remove the "thinking-slow" message if it was added
+      setMessages(prev => prev.filter(m => m.id !== 'thinking-slow'));
 
       const data = await parseApiResponse<any>(response);
 

@@ -68,7 +68,7 @@ export default function ChatHistoryScreen() {
         timeoutMs: 60000,
         slowThresholdMs: 900,
         onSlow: () => {
-          setScreenMessage('Refreshing saved chats. The server may still be waking up.');
+          setScreenMessage('Syncing with server...');
         },
       });
       const data: any = await parseApiResponse<any>(response);

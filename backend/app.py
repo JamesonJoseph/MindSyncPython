@@ -432,7 +432,7 @@ def _request_plain_chat_completion(messages: list[dict]) -> str:
 async def _request_plain_chat_completion_async(messages: list[dict]) -> str:
     return await asyncio.wait_for(
         asyncio.to_thread(_request_plain_chat_completion, messages),
-        timeout=60.0,
+        timeout=25.0,
     )
 
 async def _request_tool_chat_completion_async(messages: list[dict], tools: list[dict]):
@@ -447,7 +447,7 @@ async def _request_tool_chat_completion_async(messages: list[dict], tools: list[
             tool_choice="auto",
             max_tokens=4096,
         ),
-        timeout=60.0,
+        timeout=25.0,
     )
 
 

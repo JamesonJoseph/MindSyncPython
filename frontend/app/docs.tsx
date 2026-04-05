@@ -218,8 +218,10 @@ export default function DocsScreen() {
       const fileUri = await downloadPdfToCache(entry);
       if (!fileUri) return;
 
-      // react-native-pdf likes direct URIs from FileSystem.downloadAsync
-      setPdfUrl(fileUri);
+      // Ensure file:// prefix for react-native-pdf on Android
+      const uri = fileUri.startsWith('file://') ? fileUri : `file://${fileUri}`;
+      console.log('Viewing PDF with URI:', uri);
+      setPdfUrl(uri);
       setShowPdfModal(true);
     } catch (error) {
       console.warn('View PDF failed', error);
@@ -231,18 +233,24 @@ export default function DocsScreen() {
     try {
       const fileUri = await downloadPdfToCache(entry);
       if (!fileUri) return;
+
+      // Some sharing libraries need the file:// prefix, others don't. 
+      // FileSystem.downloadAsync returns the platform path.
+      const shareUri = fileUri.startsWith('file://') ? fileUri : `file://${fileUri}`;
+      console.log('Sharing PDF with URI:', shareUri);
+
       const isAvailable = await Sharing.isAvailableAsync();
       if (isAvailable) {
-        await Sharing.shareAsync(fileUri, {
+        await Sharing.shareAsync(shareUri, {
           mimeType: 'application/pdf',
           dialogTitle: entry.title,
         });
       } else {
-        await Linking.openURL(fileUri);
+        await Linking.openURL(shareUri);
       }
     } catch (error) {
       console.warn('Share PDF failed', error);
-      Alert.alert('Share Failed', 'Could not share this PDF.');
+      Alert.alert('Share Failed', 'Could not share this PDF. Error: ' + (error instanceof Error ? error.message : 'Unknown'));
     }
   };
 

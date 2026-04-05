@@ -150,7 +150,7 @@ export default function TaskManagerScreen() {
         timeoutMs: 60000,
         slowThresholdMs: 900,
         onSlow: () => {
-          setStatusMessage('Syncing tasks, events, and birthdays. The server may still be waking up.');
+          setStatusMessage('Syncing with server...');
         },
       });
       const payload = await parseApiResponse<any>(response);

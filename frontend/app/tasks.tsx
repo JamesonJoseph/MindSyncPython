@@ -158,7 +158,7 @@ export default function TasksScreen() {
         timeoutMs: 60000,
         slowThresholdMs: 900,
         onSlow: () => {
-          setStatusMessage('Syncing your calendar. The server may still be waking up.');
+          setStatusMessage('Syncing with server...');
         },
       });
       const payload = await parseApiResponse<any>(response);

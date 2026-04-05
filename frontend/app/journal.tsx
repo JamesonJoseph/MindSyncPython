@@ -116,7 +116,7 @@ export default function JournalScreen() {
         timeoutMs: 60000,
         slowThresholdMs: 900,
         onSlow: () => {
-          setStatusMessage('Refreshing journals. The server may still be waking up.');
+          setStatusMessage('Syncing with server...');
         },
       });
       const data: any = await parseApiResponse<any>(response);
