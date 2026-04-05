@@ -705,11 +705,7 @@ async def close_clients():
 
 @app.get("/health")
 def health_check():
-    return {
-        "status": "ok" if not _mongo_error else "degraded",
-        "mongo": "connected" if not _mongo_error else "unavailable",
-        "mongoError": _mongo_error,
-    }
+    return {"status": "ok"}
 
 # ==================== JOURNALS ====================
 

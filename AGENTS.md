@@ -99,7 +99,7 @@ cd frontend && npm run lint && npx tsc --noEmit
 
 ### Backend (Python)
 
-- **Single file architecture:** The entire backend lives in `app.py` (~1900 lines). All routes, helpers, and config are in this one file.
+- **Single file architecture:** The entire backend lives in `app.py` (~2040 lines). All routes, helpers, and config are in this one file.
 - **Imports:** stdlib first, then third-party, then local. One import per line.
 - **Naming:** `snake_case` for functions, variables, modules. PascalCase for classes.
 - **Type hints:** Use modern union syntax `str | None` (Python 3.10+).
