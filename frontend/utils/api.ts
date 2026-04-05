@@ -3,7 +3,7 @@ import { onAuthStateChanged } from 'firebase/auth';
 import { auth } from '../firebaseConfig';
 
 const API_PORT = '5000';
-const DEFAULT_REQUEST_TIMEOUT_MS = 15000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 60000; // Increased to 60s for Render free tier cold starts
 const AUTH_READY_TIMEOUT_MS = 3500;
 const DEFAULT_SLOW_THRESHOLD_MS = 1200;
 

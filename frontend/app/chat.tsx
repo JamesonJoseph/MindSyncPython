@@ -422,7 +422,7 @@ export default function ChatScreen() {
     try {
       const response = await authFetch('/api/chat/save', {
         method: 'POST',
-        timeoutMs: 30000,
+        timeoutMs: 60000,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           conversationId: conversationId || undefined,
@@ -514,7 +514,7 @@ export default function ChatScreen() {
     try {
       const response = await authFetch(`/api/chat/conversations/${conversationId}`, {
         method: 'PUT',
-        timeoutMs: 30000,
+        timeoutMs: 60000,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ title }),
       });
@@ -552,7 +552,7 @@ export default function ChatScreen() {
             try {
               const response = await authFetch(`/api/chat/conversations/${conversationId}`, {
                 method: 'DELETE',
-                timeoutMs: 30000,
+                timeoutMs: 60000,
               });
               const data = await parseApiResponse<any>(response);
               if (!response.ok) {

@@ -113,7 +113,7 @@ export default function JournalScreen() {
       setErrorMessage(null);
       const response = await authFetch('/api/journals', {
         signal,
-        timeoutMs: 12000,
+        timeoutMs: 60000,
         slowThresholdMs: 900,
         onSlow: () => {
           setStatusMessage('Refreshing journals. The server may still be waking up.');

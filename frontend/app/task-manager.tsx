@@ -147,7 +147,7 @@ export default function TaskManagerScreen() {
     try {
       const response = await authFetch(path, {
         signal,
-        timeoutMs: 12000,
+        timeoutMs: 60000,
         slowThresholdMs: 900,
         onSlow: () => {
           setStatusMessage('Syncing tasks, events, and birthdays. The server may still be waking up.');

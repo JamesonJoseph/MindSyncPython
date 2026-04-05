@@ -65,7 +65,7 @@ export default function ChatHistoryScreen() {
     try {
       const response = await authFetch('/api/chat/conversations', {
         signal,
-        timeoutMs: 12000,
+        timeoutMs: 60000,
         slowThresholdMs: 900,
         onSlow: () => {
           setScreenMessage('Refreshing saved chats. The server may still be waking up.');

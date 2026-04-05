@@ -210,7 +210,7 @@ await transcribeRecording(audioUri);
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ content: content }),
-            timeoutMs: 20000,
+            timeoutMs: 60000,
           });
           data = await parseApiResponse<any>(response);
           lastError = null;

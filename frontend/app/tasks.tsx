@@ -155,7 +155,7 @@ export default function TasksScreen() {
     try {
       const response = await authFetch(path, {
         signal,
-        timeoutMs: 12000,
+        timeoutMs: 60000,
         slowThresholdMs: 900,
         onSlow: () => {
           setStatusMessage('Syncing your calendar. The server may still be waking up.');

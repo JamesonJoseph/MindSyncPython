@@ -64,7 +64,7 @@ export default function HomeScreen() {
         const response = await authFetch(`${apiUrl}/api/emotion`, {
           method: 'POST',
           body: formData,
-          timeoutMs: 12000,
+          timeoutMs: 60000,
           slowThresholdMs: 1500,
         });
 

@@ -142,7 +142,7 @@ export function VaultProvider({ children }: { children: ReactNode }) {
     try {
       const key = await getActiveEncryptionKey();
       const { authFetch } = await import('../../utils/api');
-      const res = await authFetch('/api/documents', { timeoutMs: 30000 });
+      const res = await authFetch('/api/documents', { timeoutMs: 60000 });
       if (!res.ok) {
         return;
       }

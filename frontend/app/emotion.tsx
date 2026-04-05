@@ -93,7 +93,7 @@ export default function EmotionScreen() {
         method: 'POST',
         body: formData,
         headers: { Accept: 'application/json' },
-        timeoutMs: 30000,
+        timeoutMs: 60000,
       });
 
       const data = await parseApiResponse<any>(response);
