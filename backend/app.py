@@ -114,6 +114,8 @@ async def _require_auth(request: Request) -> dict:
 
     auth_header = request.headers.get("Authorization") or request.headers.get("authorization")
     if not auth_header:
+        if fallback_uid:
+            return {"uid": fallback_uid, "email": fallback_email}
         raise HTTPException(status_code=401, detail="Missing Authorization header")
 
     parts = auth_header.split()
