@@ -259,7 +259,7 @@
 					"-ObjC",
 					"-lc++",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = "com.mindsync.app";
+				PRODUCT_BUNDLE_IDENTIFIER = "com.sjcet.mindsync";
 				PRODUCT_NAME = "MindSyncApp";
 				SWIFT_OBJC_BRIDGING_HEADER = "MindSyncApp/MindSyncApp-Bridging-Header.h";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
@@ -288,7 +288,7 @@
 					"-ObjC",
 					"-lc++",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = "com.mindsync.app";
+				PRODUCT_BUNDLE_IDENTIFIER = "com.sjcet.mindsync";
 				PRODUCT_NAME = "MindSyncApp";
 				SWIFT_OBJC_BRIDGING_HEADER = "MindSyncApp/MindSyncApp-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;

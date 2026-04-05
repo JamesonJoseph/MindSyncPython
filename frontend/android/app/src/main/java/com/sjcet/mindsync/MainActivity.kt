@@ -1,4 +1,4 @@
-package com.mindsync.app
+package com.sjcet.mindsync
 import expo.modules.splashscreen.SplashScreenManager
 
 import android.os.Build

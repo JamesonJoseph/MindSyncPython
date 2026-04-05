@@ -19,7 +19,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect } from 'expo-router';
 import * as Clipboard from 'expo-clipboard';
 import * as DocumentPicker from 'expo-document-picker';
-import * as FileSystem from 'expo-file-system/legacy';
+import { File, Directory } from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 import Pdf from 'react-native-pdf';
 import { auth } from '../firebaseConfig';
@@ -186,13 +186,16 @@ export default function DocsScreen() {
       const token = await user.getIdToken(false);
       const apiUrl = getApiBaseUrl();
       const safeName = (entry.fileName || `${entry.title}.pdf`).replace(/[^\w.\-]/g, '_');
-      const fileUri = `${FileSystem.cacheDirectory}${safeName}`;
+      
+      // Use the new File API for SDK 54
+      const file = new File(Directory.cache, safeName);
       const targetUrl = entry.url.startsWith('http')
         ? entry.url
         : `${apiUrl}${entry.url.startsWith('/') ? '' : '/'}${entry.url}`;
 
-      console.log('Downloading PDF from:', targetUrl);
-      const downloadRes = await FileSystem.downloadAsync(targetUrl, fileUri, {
+      console.log('Downloading PDF using new File API from:', targetUrl);
+      
+      await file.downloadAsync(targetUrl, {
         headers: {
           Authorization: `Bearer ${token}`,
           'X-User-Id': user.uid,
@@ -200,16 +203,11 @@ export default function DocsScreen() {
         },
       });
 
-      if (downloadRes.status !== 200) {
-        console.warn('Download failed with status:', downloadRes.status);
-        Alert.alert('Download Failed', `The server returned error ${downloadRes.status}. It may still be waking up.`);
-        return null;
-      }
-
-      return downloadRes.uri;
+      return file.uri;
     } catch (error) {
       console.error('downloadPdfToCache error:', error);
-      throw error;
+      Alert.alert('Download Failed', 'The server could not provide the file. It may still be waking up.');
+      return null;
     }
   };
 

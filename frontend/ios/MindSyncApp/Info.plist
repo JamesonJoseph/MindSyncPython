@@ -28,7 +28,7 @@
         <key>CFBundleURLSchemes</key>
         <array>
           <string>mindsyncapp</string>
-          <string>com.mindsync.app</string>
+          <string>com.sjcet.mindsync</string>
         </array>
       </dict>
     </array>

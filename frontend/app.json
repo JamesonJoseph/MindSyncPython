@@ -10,10 +10,11 @@
     "newArchEnabled": false,
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.mindsync.app"
+      "bundleIdentifier": "com.sjcet.mindsync"
     },
     "android": {
-      "package": "com.mindsync.app",
+      "package": "com.sjcet.mindsync",
+      "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/images/android-icon-foreground.png",

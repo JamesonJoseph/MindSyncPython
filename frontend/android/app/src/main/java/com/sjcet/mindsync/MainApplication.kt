@@ -1,4 +1,4 @@
-package com.mindsync.app
+package com.sjcet.mindsync
 
 import android.app.Application
 import android.content.res.Configuration

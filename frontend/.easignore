@@ -1,0 +1,13 @@
+# @generated expo-cli
+expo-env.d.ts
+
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+.env
+.expo/
+
+# IMPORTANT: We do NOT list google-services.json here 
+# because we want EAS to upload it for the build.

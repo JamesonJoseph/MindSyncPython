@@ -55,13 +55,15 @@ export async function registerForPushNotificationsAsync(): Promise<string | null
 
     console.log('Expo Push Token:', token);
 
-    // Configure Android notification channel
+    // Configure a single reliable Android notification channel
     if (Platform.OS === 'android') {
-      await Notifications.setNotificationChannelAsync('task-reminders', {
-        name: 'Task Reminders',
-        importance: Notifications.AndroidImportance.HIGH,
+      await Notifications.setNotificationChannelAsync('default', {
+        name: 'MindSync Notifications',
+        importance: Notifications.AndroidImportance.MAX,
         vibrationPattern: [0, 250, 250, 250],
         lightColor: '#00E0C6',
+        lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
+        showBadge: true,
       });
     }
 
@@ -100,30 +102,15 @@ export async function requestNotificationPermissions(): Promise<boolean> {
     return false;
   }
 
-  // Configure Android notification channel
+  // Configure a single reliable Android notification channel
   if (Platform.OS === 'android') {
-    await Notifications.setNotificationChannelAsync('task-reminders', {
-      name: 'Task Reminders',
-      importance: Notifications.AndroidImportance.HIGH,
+    await Notifications.setNotificationChannelAsync('default', {
+      name: 'MindSync Notifications',
+      importance: Notifications.AndroidImportance.MAX,
       vibrationPattern: [0, 250, 250, 250],
       lightColor: '#00E0C6',
-      sound: 'default',
-    });
-
-    await Notifications.setNotificationChannelAsync('event-reminders', {
-      name: 'Event Reminders',
-      importance: Notifications.AndroidImportance.HIGH,
-      vibrationPattern: [0, 250, 250, 250],
-      lightColor: '#FF9500',
-      sound: 'default',
-    });
-
-    await Notifications.setNotificationChannelAsync('birthday-reminders', {
-      name: 'Birthday Reminders',
-      importance: Notifications.AndroidImportance.HIGH,
-      vibrationPattern: [0, 250, 250, 250],
-      lightColor: '#FF6B6B',
-      sound: 'default',
+      lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
+      showBadge: true,
     });
   }
 
@@ -158,7 +145,7 @@ export async function scheduleNotification(
       return null;
     }
 
-    const channelId = Platform.OS === 'android' ? `${type}-reminders` : undefined;
+    const channelId = Platform.OS === 'android' ? 'default' : undefined;
 
     const notificationId = await Notifications.scheduleNotificationAsync({
       content: {
@@ -169,10 +156,12 @@ export async function scheduleNotification(
           type,
         },
         sound: 'default',
+        priority: Notifications.AndroidNotificationPriority.MAX,
         ...(channelId && { channelId }),
       },
       trigger: {
         date: triggerDate,
+        channelId: channelId,
       } as any,
     });
 
