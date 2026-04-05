@@ -140,7 +140,7 @@ export default function TasksScreen() {
     setErrorMessage(null);
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 15000);
+    const timeoutId = setTimeout(() => controller.abort(), 30000);
 
     try {
       const [tasksRes, birthdaysRes, eventsRes] = await Promise.all([
@@ -280,6 +280,16 @@ export default function TasksScreen() {
     console.log(`Selected date: ${selectedDate.toISOString()}, key: ${dateString}`);
     return tasksByDate[dateString] || [];
   };
+
+  const getAllLoadedTaskCount = () =>
+    Object.values(tasksByDate).reduce((count, items) => count + items.length, 0);
+
+  const getSelectedDateHeading = () =>
+    selectedDate.toLocaleDateString('en-US', {
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+    });
 
    const handleAddTask = async () => {
      if (!newTaskTitle.trim() || !userId) return;
@@ -712,7 +722,17 @@ export default function TasksScreen() {
             )}
 
             <View style={styles.tasksSection}>
-              <Text style={styles.sectionTitle}>{"🔥 Today's Focus"}</Text>
+              <View style={styles.sectionHeaderRow}>
+                <View>
+                  <Text style={styles.sectionTitle}>{`Scheduled for ${getSelectedDateHeading()}`}</Text>
+                  <Text style={styles.sectionSubtitle}>
+                    {`${getSelectedDateTasks().length} shown • ${getAllLoadedTaskCount()} total tasks loaded`}
+                  </Text>
+                </View>
+                <TouchableOpacity onPress={() => router.push('/task-manager')}>
+                  <Text style={styles.viewAllText}>View All</Text>
+                </TouchableOpacity>
+              </View>
               {loadingTasks && (
                 <View style={styles.loadingContainer}>
                   <ActivityIndicator size="small" color="#00E0C6" />
@@ -737,7 +757,11 @@ export default function TasksScreen() {
               <Text style={styles.emptyIcon}>🎉</Text>
               <Text style={styles.emptyTitle}>{errorMessage ? 'Could not load tasks' : 'Nothing planned'}</Text>
               <Text style={styles.emptySubtitle}>
-                {errorMessage || 'Tap + to add a task, event, or birthday!'}
+                {errorMessage || (
+                  getAllLoadedTaskCount() > 0
+                    ? `No tasks are scheduled for ${getSelectedDateHeading()}. Use the calendar or View All to browse the loaded items.`
+                    : 'Tap + to add a task, event, or birthday!'
+                )}
               </Text>
               {errorMessage ? (
                 <TouchableOpacity style={styles.inlineRetryButton} onPress={() => void loadData()}>
@@ -984,6 +1008,9 @@ const styles = StyleSheet.create({
   dateBirthdayRelation: { fontSize: 13, color: '#666', marginTop: 2 },
   tasksSection: { paddingHorizontal: 20, paddingVertical: 16, backgroundColor: '#fff', marginTop: 16 },
   sectionTitle: { fontSize: 18, fontWeight: 'bold', color: '#333', marginBottom: 12 },
+  sectionHeaderRow: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: 12 },
+  sectionSubtitle: { fontSize: 13, color: '#777', marginTop: -8 },
+  viewAllText: { color: '#00E0C6', fontWeight: '700', fontSize: 13, paddingTop: 2 },
   loadingContainer: { alignItems: 'center', padding: 16 },
   taskListContent: { padding: 12 },
   itemCard: {

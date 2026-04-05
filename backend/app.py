@@ -385,16 +385,48 @@ def _request_plain_chat_completion(messages: list[dict]) -> str:
     )
     return response.choices[0].message.content if response.choices else ""
 
+async def _request_plain_chat_completion_async(messages: list[dict]) -> str:
+    return await asyncio.wait_for(
+        asyncio.to_thread(_request_plain_chat_completion, messages),
+        timeout=60.0,
+    )
+
+async def _request_tool_chat_completion_async(messages: list[dict], tools: list[dict]):
+    if not groq_client:
+        return None
+    return await asyncio.wait_for(
+        asyncio.to_thread(
+            groq_client.chat.completions.create,
+            model="llama-3.1-8b-instant",
+            messages=messages,
+            tools=tools,
+            tool_choice="auto",
+            max_tokens=4096,
+        ),
+        timeout=60.0,
+    )
+
 
 # ==================== DOCUMENTS / SECURE VAULT ====================
 
 @app.get("/api/documents")
 async def get_documents(request: Request):
-    auth_info = await _require_auth(request)
-    uid = auth_info.get("uid")
-    _, _, _, _, _, _, documents, _, _, _ = _get_collections()
-    docs = list(documents.find({"userId": uid}).sort("date", DESCENDING))
-    return [_serialize_doc(doc) for doc in docs]
+    try:
+        auth_info = await _require_auth(request)
+        uid = auth_info.get("uid")
+        _, _, _, _, _, _, documents, _, _, _ = _get_collections()
+        docs = await asyncio.to_thread(
+            lambda: list(documents.find({"userId": uid}).sort("date", DESCENDING))
+        )
+        return [_serialize_doc(doc) for doc in docs]
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print("[documents] fetch failed:", exc)
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Failed to fetch documents", "detail": "Database query failed"},
+        )
 
 
 @app.post("/api/documents")
@@ -724,7 +756,11 @@ async def close_clients():
         await _gemini_http_client.aclose()
 
 @app.get("/health")
-async def health_check():
+def health_check():
+    return {"status": "ok"}
+
+@app.get("/health/db")
+async def health_check_db():
     mongo = await asyncio.to_thread(_get_mongo_health_snapshot)
     return {
         "status": "ok" if mongo.get("connected") else "degraded",
@@ -739,7 +775,9 @@ async def get_journals(request: Request):
         auth_info = await _require_auth(request)
         uid = auth_info.get("uid")
         journals, _, _, _, _, _, _, _, _, _ = _get_collections()
-        docs = list(journals.find({"userId": uid}).sort("date", DESCENDING))
+        docs = await asyncio.to_thread(
+            lambda: list(journals.find({"userId": uid}).sort("date", DESCENDING))
+        )
         return [_serialize_doc(doc) for doc in docs]
     except HTTPException:
         raise
@@ -849,7 +887,9 @@ async def get_tasks(request: Request):
         auth_info = await _require_auth(request)
         uid = auth_info.get("uid")
         _, _, tasks, _, _, _, _, _, _, _ = _get_collections()
-        docs = list(tasks.find({"userId": uid}).sort("event_datetime", ASCENDING))
+        docs = await asyncio.to_thread(
+            lambda: list(tasks.find({"userId": uid}).sort("event_datetime", ASCENDING))
+        )
         return [_serialize_doc(doc) for doc in docs]
     except HTTPException:
         raise
@@ -1337,24 +1377,18 @@ async def chat_agent(request: Request):
     try:
         # System message setup
         system_msg = {
-            "role": "system", 
+            "role": "system",
             "content": "You are MindSync AI, an empathetic and helpful personal assistant. You can manage tasks and review the user's journal entries to better understand their context and feelings. You may use tools to achieve this."
         }
-        
+
         call_messages = [system_msg] + messages
         try:
-            response = groq_client.chat.completions.create(
-                model="llama-3.1-8b-instant",
-                messages=call_messages,
-                tools=tools,
-                tool_choice="auto",
-                max_tokens=4096
-            )
-        except BadRequestError as exc:
+            response = await _request_tool_chat_completion_async(call_messages, tools)
+        except (BadRequestError, asyncio.TimeoutError) as exc:
             # Groq can fail hard on tool-calling for otherwise valid prompts.
             # Fall back to a plain chat completion so the user still gets a reply.
             print("[chat] tool call fallback:", exc)
-            fallback_content = _request_plain_chat_completion(call_messages)
+            fallback_content = await _request_plain_chat_completion_async(call_messages)
             return {"role": "assistant", "content": fallback_content}
 
         response_message = response.choices[0].message
@@ -1380,7 +1414,9 @@ async def chat_agent(request: Request):
                     tool_response = ""
 
                     if function_name == "get_tasks":
-                        docs = list(tasks.find({"userId": uid}).sort("event_datetime", ASCENDING).limit(10))
+                        docs = await asyncio.to_thread(
+                            lambda: list(tasks.find({"userId": uid}).sort("event_datetime", ASCENDING).limit(10))
+                        )
                         tool_response = json.dumps([_serialize_doc(d) for d in docs])
                     elif function_name == "create_task":
                         event_datetime = _parse_iso_datetime(function_args.get("event_datetime")) or _utc_now()
@@ -1415,7 +1451,9 @@ async def chat_agent(request: Request):
                         except Exception:
                             tool_response = json.dumps({"status": "error", "message": "Invalid task ID"})
                     elif function_name == "get_journals":
-                        docs = list(journals.find({"userId": uid}).sort("date", DESCENDING).limit(5))
+                        docs = await asyncio.to_thread(
+                            lambda: list(journals.find({"userId": uid}).sort("date", DESCENDING).limit(5))
+                        )
                         tool_response = json.dumps([_serialize_doc(d) for d in docs])
                     else:
                         tool_response = json.dumps({"error": "Unknown function"})
@@ -1427,11 +1465,11 @@ async def chat_agent(request: Request):
                         "content": tool_response
                     })
 
-                assistant_content = _request_plain_chat_completion(call_messages)
+                assistant_content = await _request_plain_chat_completion_async(call_messages)
                 return {"role": "assistant", "content": assistant_content}
             except Exception as exc:
                 print("[chat] tool execution fallback:", exc)
-                fallback_content = _request_plain_chat_completion(call_messages[:1] + messages)
+                fallback_content = await _request_plain_chat_completion_async(call_messages[:1] + messages)
                 return {"role": "assistant", "content": fallback_content}
 
         assistant_content = response_message.content or ""

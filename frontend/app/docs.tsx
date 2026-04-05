@@ -16,7 +16,7 @@ import {
 import { WebView } from 'react-native-webview';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
+import { useRouter, useFocusEffect } from 'expo-router';
 import * as Clipboard from 'expo-clipboard';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -81,6 +81,7 @@ export default function DocsScreen() {
     entries,
     isLocked,
     isLoading,
+    refreshEntries,
     unlockVault,
     lockVault,
     searchEntries,
@@ -102,7 +103,13 @@ export default function DocsScreen() {
     if (isLocked) {
       unlockVault();
     }
-  }, []);
+  }, [isLocked, unlockVault]);
+
+  useFocusEffect(
+    React.useCallback(() => {
+      void refreshEntries();
+    }, [refreshEntries])
+  );
 
   const filteredEntries = searchEntries(searchQuery);
   const groupedEntries = (Object.keys(ENTRY_CONFIG) as VaultEntryType[]).map(type => ({

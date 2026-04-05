@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
 import * as Crypto from 'expo-crypto';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as LocalAuthentication from 'expo-local-authentication';
@@ -60,6 +60,7 @@ interface VaultContextType {
   entries: VaultEntry[];
   isLocked: boolean;
   isLoading: boolean;
+  refreshEntries: () => Promise<void>;
   addEntry: (entry: Omit<VaultEntry, 'id' | 'createdAt' | 'entryType'> & { entryType?: VaultEntryType }) => Promise<void>;
   deleteEntry: (id: string) => Promise<void>;
   updateEntry: (id: string, entry: Partial<VaultEntry>) => Promise<void>;
@@ -132,6 +133,51 @@ export function VaultProvider({ children }: { children: ReactNode }) {
     initializeVault();
   }, []);
 
+  const refreshEntries = useCallback(async (): Promise<void> => {
+    const user = auth.currentUser;
+    if (!user) {
+      return;
+    }
+
+    try {
+      const key = await getActiveEncryptionKey();
+      const { authFetch } = await import('../../utils/api');
+      const res = await authFetch('/api/documents', { timeoutMs: 30000 });
+      if (!res.ok) {
+        return;
+      }
+
+      const backendDocs = await parseApiResponse<any[]>(res);
+      const decryptedEntries: Array<VaultEntry | null> = await Promise.all(
+        (Array.isArray(backendDocs) ? backendDocs : []).map(async (doc: any) => {
+          if (doc.type !== 'vault' && doc.type !== 'secure-doc') {
+            return null;
+          }
+
+          try {
+            const decryptedData = await decryptData(doc.content, key);
+            const parsedEntries = parseStoredEntries(decryptedData);
+            const firstEntry = parsedEntries[0];
+            return firstEntry ? { ...firstEntry, _id: doc._id } : null;
+          } catch {
+            return null;
+          }
+        })
+      );
+
+      const validEntries = decryptedEntries.filter((entry): entry is VaultEntry => entry !== null);
+      if (validEntries.length === 0) {
+        return;
+      }
+
+      setEntries(validEntries);
+      const encrypted = await encryptData(JSON.stringify(validEntries), key);
+      await AsyncStorage.setItem(STORAGE_KEY, encrypted);
+    } catch (error) {
+      console.log('Backend vault fetch failed, using local', error);
+    }
+  }, [encryptionKey]);
+
   const getActiveEncryptionKey = async (): Promise<string> => {
     if (encryptionKey) {
       return encryptionKey;
@@ -170,46 +216,11 @@ export function VaultProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      void (async () => {
-        try {
-          const key = await getActiveEncryptionKey();
-          const { authFetch } = await import('../../utils/api');
-          const res = await authFetch('/api/documents');
-          if (!res.ok) {
-            return;
-          }
-
-          const backendDocs = await parseApiResponse<any[]>(res);
-          const decryptedEntries = await Promise.all(
-            backendDocs.map(async (doc: any) => {
-              if (doc.type !== 'vault' && doc.type !== 'secure-doc') return null;
-              try {
-                const decryptedData = await decryptData(doc.content, key);
-                const parsedEntries = parseStoredEntries(decryptedData);
-                const firstEntry = parsedEntries[0];
-                return firstEntry ? { ...firstEntry, _id: doc._id } : null;
-              } catch {
-                return null;
-              }
-            })
-          );
-
-          const validEntries = decryptedEntries.filter((entry): entry is VaultEntry => entry !== null);
-          if (validEntries.length === 0) {
-            return;
-          }
-
-          setEntries(validEntries);
-          const encrypted = await encryptData(JSON.stringify(validEntries), key);
-          await AsyncStorage.setItem(STORAGE_KEY, encrypted);
-        } catch (error) {
-          console.log('Backend vault fetch failed, using local', error);
-        }
-      })();
+      void refreshEntries();
     });
 
     return unsubscribe;
-  }, []);
+  }, [refreshEntries]);
 
   const encryptData = async (data: string, key: string): Promise<string> => {
     const digest = await Crypto.digestStringAsync(
@@ -239,6 +250,9 @@ export function VaultProvider({ children }: { children: ReactNode }) {
           key + data
         );
         if (verifyHash === hash) {
+          return data;
+        }
+        if (data.trim().startsWith('{') || data.trim().startsWith('[')) {
           return data;
         }
         return '[]';
@@ -424,6 +438,7 @@ export function VaultProvider({ children }: { children: ReactNode }) {
       entries,
       isLocked,
       isLoading,
+      refreshEntries,
       addEntry,
       deleteEntry,
       updateEntry,

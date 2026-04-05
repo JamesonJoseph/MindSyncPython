@@ -3,8 +3,8 @@ import { onAuthStateChanged } from 'firebase/auth';
 import { auth } from '../firebaseConfig';
 
 const API_PORT = '5000';
-const DEFAULT_REQUEST_TIMEOUT_MS = 15000;
-const AUTH_READY_TIMEOUT_MS = 2500;
+const DEFAULT_REQUEST_TIMEOUT_MS = 30000;
+const AUTH_READY_TIMEOUT_MS = 8000;
 
 let authReadyPromise: Promise<void> | null = null;
 

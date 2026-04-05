@@ -17,8 +17,8 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { auth } from '../firebaseConfig';
-import { getApiBaseUrl, parseApiResponse } from '../utils/api';
+import { authFetch, parseApiResponse } from '../utils/api';
+import { useAuthSession } from '../utils/useAuthSession';
 
 type Message = {
   id: string;
@@ -48,7 +48,7 @@ const RECENT_JOURNALS_CACHE_KEY = 'mindsync_recent_journals_v1';
 const CONVERSATION_CACHE_PREFIX = 'mindsync_conversation_';
 
 function isTimeoutError(error: unknown): boolean {
-  return error instanceof Error && /network request timed out/i.test(error.message);
+  return error instanceof Error && /network request timed out|aborted/i.test(error.message);
 }
 
 function parseContext(rawContext: string | string[] | undefined): Record<string, unknown> | undefined {
@@ -71,6 +71,7 @@ export default function ChatScreen() {
   const router = useRouter();
   const params = useLocalSearchParams();
   const insets = useSafeAreaInsets();
+  const { user, isAuthReady } = useAuthSession();
   const hasAutoSentRef = useRef(false);
   const rawConversationId = Array.isArray(params.conversationId) ? params.conversationId[0] : params.conversationId;
   const rawContextType = Array.isArray(params.contextType) ? params.contextType[0] : params.contextType;
@@ -164,9 +165,7 @@ export default function ChatScreen() {
     const loadRecentConversations = async () => {
       setLoadingRecentChats(true);
       try {
-        const apiUrl = getApiBaseUrl();
-        const { authFetch } = await import('../utils/api');
-        const response = await authFetch(`${apiUrl}/api/chat/conversations?limit=5`);
+        const response = await authFetch('/api/chat/conversations?limit=5', { timeoutMs: 30000 });
         const data: any = await parseApiResponse<any>(response);
         if (!response.ok) {
           throw new Error(
@@ -192,9 +191,7 @@ export default function ChatScreen() {
     const loadRecentJournals = async () => {
       setLoadingRecentJournals(true);
       try {
-        const apiUrl = getApiBaseUrl();
-        const { authFetch } = await import('../utils/api');
-        const response = await authFetch(`${apiUrl}/api/journals/search?limit=5&sort=desc`);
+        const response = await authFetch('/api/journals/search?limit=5&sort=desc', { timeoutMs: 30000 });
         const data: any = await parseApiResponse<any>(response);
         if (!response.ok) {
           throw new Error(
@@ -254,9 +251,7 @@ export default function ChatScreen() {
           }
         }
 
-        const apiUrl = getApiBaseUrl();
-        const { authFetch } = await import('../utils/api');
-        const response = await authFetch(`${apiUrl}/api/chat/conversations/${conversationId}`);
+        const response = await authFetch(`/api/chat/conversations/${conversationId}`, { timeoutMs: 30000 });
         const data = await parseApiResponse<any>(response);
 
         if (!response.ok) {
@@ -306,10 +301,7 @@ export default function ChatScreen() {
   }, [conversationId, initialMessagesParam]);
 
   const requestAssistantReply = async (messageList: Message[]) => {
-    const user = auth.currentUser;
-    const activeUserId = user?.uid;
-
-    if (!activeUserId) {
+    if (!isAuthReady || !user?.uid) {
       Alert.alert("Authentication Required", "Please log in to use the AI chat.");
       return;
     }
@@ -322,10 +314,9 @@ export default function ChatScreen() {
         content: m.content,
       }));
 
-      const apiUrl = getApiBaseUrl();
-      const { authFetch } = await import('../utils/api');
-      const response = await authFetch(`${apiUrl}/api/chat`, {
+      const response = await authFetch('/api/chat', {
         method: 'POST',
+        timeoutMs: 60000,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           messages: apiMessages,
@@ -358,14 +349,18 @@ export default function ChatScreen() {
       if (!isTimeoutError(error)) {
         console.warn("Chat network error:", error);
       }
+      const fallbackMessage =
+        isTimeoutError(error)
+          ? 'The AI reply timed out while the server or model was still working. Please try again.'
+          : error instanceof Error && error.message
+            ? error.message
+            : 'Network error. Please try again.';
       setMessages(prev => [
         ...prev,
         {
           id: `${Date.now()}-assistant-error`,
           role: 'assistant',
-          content: error instanceof Error && error.message
-            ? error.message
-            : 'Network error. Please try again.'
+          content: fallbackMessage
         }
       ]);
     } finally {
@@ -377,7 +372,7 @@ export default function ChatScreen() {
     const autoSendRaw = Array.isArray(params.autoSend) ? params.autoSend[0] : params.autoSend;
     const shouldAutoSend = autoSendRaw === '1';
 
-    if (!shouldAutoSend || hasAutoSentRef.current || messages.length === 0) {
+    if (!shouldAutoSend || hasAutoSentRef.current || messages.length === 0 || !isAuthReady) {
       return;
     }
 
@@ -388,7 +383,7 @@ export default function ChatScreen() {
 
     hasAutoSentRef.current = true;
     requestAssistantReply(messages);
-  }, [messages, params.autoSend]);
+  }, [isAuthReady, messages, params.autoSend]);
 
   const sendMessage = async () => {
     if (!inputText.trim()) return;
@@ -418,18 +413,16 @@ export default function ChatScreen() {
       return;
     }
 
-    const user = auth.currentUser;
-    if (!user?.uid) {
+    if (!isAuthReady || !user?.uid) {
       if (!messagesToSave) Alert.alert('Authentication Required', 'Please log in to save the chat.');
       return;
     }
 
     setSavingConversation(true);
     try {
-      const apiUrl = getApiBaseUrl();
-      const { authFetch } = await import('../utils/api');
-      const response = await authFetch(`${apiUrl}/api/chat/save`, {
+      const response = await authFetch('/api/chat/save', {
         method: 'POST',
+        timeoutMs: 30000,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           conversationId: conversationId || undefined,
@@ -519,10 +512,9 @@ export default function ChatScreen() {
 
     setSavingConversation(true);
     try {
-      const apiUrl = getApiBaseUrl();
-      const { authFetch } = await import('../utils/api');
-      const response = await authFetch(`${apiUrl}/api/chat/conversations/${conversationId}`, {
+      const response = await authFetch(`/api/chat/conversations/${conversationId}`, {
         method: 'PUT',
+        timeoutMs: 30000,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ title }),
       });
@@ -558,10 +550,9 @@ export default function ChatScreen() {
           style: 'destructive',
           onPress: async () => {
             try {
-              const apiUrl = getApiBaseUrl();
-              const { authFetch } = await import('../utils/api');
-              const response = await authFetch(`${apiUrl}/api/chat/conversations/${conversationId}`, {
+              const response = await authFetch(`/api/chat/conversations/${conversationId}`, {
                 method: 'DELETE',
+                timeoutMs: 30000,
               });
               const data = await parseApiResponse<any>(response);
               if (!response.ok) {
