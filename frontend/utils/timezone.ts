@@ -8,8 +8,10 @@ const IST_OFFSET = 5.5 * 60 * 60 * 1000; // 5 hours 30 minutes in milliseconds
  */
 export function getISTNow(): Date {
   const now = new Date();
-  const utc = now.getTime() + now.getTimezoneOffset() * 60000;
-  return new Date(utc + IST_OFFSET);
+  // IST is UTC+5:30.
+  // Convert current system time to UTC timestamp, then add 5.5 hours.
+  const utcTimestamp = now.getTime() + (now.getTimezoneOffset() * 60 * 1000);
+  return new Date(utcTimestamp + IST_OFFSET);
 }
 
 /**
@@ -52,16 +54,12 @@ export function getTodayIST(): string {
 
 export function getISTDateString(date: Date | string): string {
   const value = typeof date === 'string' ? new Date(date) : date;
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Kolkata',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).formatToParts(value);
-
-  const year = parts.find((part) => part.type === 'year')?.value ?? '1970';
-  const month = parts.find((part) => part.type === 'month')?.value ?? '01';
-  const day = parts.find((part) => part.type === 'day')?.value ?? '01';
+  
+  // Use explicit local getters to avoid Intl shifting the day
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, '0');
+  const day = String(value.getDate()).padStart(2, '0');
+  
   return `${year}-${month}-${day}`;
 }
 
@@ -127,30 +125,16 @@ export function toISTISOString(dateStr: string, timeStr?: string): string {
       minutes = parsed.minutes;
     }
 
-    // Validate values
-    if (isNaN(year) || isNaN(month) || isNaN(day)) {
-      throw new Error(`Invalid date: ${dateStr}`);
-    }
-    if (isNaN(hours) || isNaN(minutes)) {
-      throw new Error(`Invalid time: ${timeStr}`);
-    }
-
-    // Clamp values to valid ranges
-    hours = Math.max(0, Math.min(23, hours));
-    minutes = Math.max(0, Math.min(59, minutes));
-    const clampedMonth = Math.max(1, Math.min(12, month));
-    const clampedDay = Math.max(1, Math.min(31, day));
-
-    // Create date in UTC with IST offset (IST = UTC+5:30)
-    // UTC time = IST time - 5:30
+    // Construct a timestamp as if the input parts were UTC
+    const dateAsIfUtc = Date.UTC(year, month - 1, day, hours, minutes, 0);
+    
+    // Since input was IST (UTC+5:30), we must subtract 5.5 hours to get true UTC
     const istOffsetMs = 5.5 * 60 * 60 * 1000;
-    const istDate = new Date(Date.UTC(year, clampedMonth - 1, clampedDay, hours, minutes, 0));
-    const utcDate = new Date(istDate.getTime() - istOffsetMs);
+    const trueUtcDate = new Date(dateAsIfUtc - istOffsetMs);
 
-    return utcDate.toISOString();
+    return trueUtcDate.toISOString();
   } catch (error) {
     console.error('Error in toISTISOString:', error, { dateStr, timeStr });
-    // Fallback: return current time in ISO format
     return new Date().toISOString();
   }
 }

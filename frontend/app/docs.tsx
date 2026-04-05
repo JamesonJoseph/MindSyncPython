@@ -208,9 +208,9 @@ export default function DocsScreen() {
         console.error('[PDF] file.downloadAsync failed:', downloadErr);
         // Fallback to legacy method if the new API fails on this specific device/version
         console.log('[PDF] Attempting legacy fallback...');
-        const { downloadAsync, cacheDirectory } = await import('expo-file-system/legacy');
-        const legacyPath = `${cacheDirectory}${safeName}`;
-        const res = await downloadAsync(targetUrl, legacyPath, {
+        const legacyFS = await import('expo-file-system/legacy');
+        const legacyPath = `${legacyFS.cacheDirectory}${safeName}`;
+        const res = await legacyFS.downloadAsync(targetUrl, legacyPath, {
           headers: {
             Authorization: `Bearer ${token}`,
             'X-User-Id': user.uid,

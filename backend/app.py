@@ -57,12 +57,12 @@ DB_CONNECT_TIMEOUT_MS = int(os.getenv("DB_CONNECT_TIMEOUT_MS", "8000"))
 ANALYZE_TIMEOUT_SECONDS = float(os.getenv("ANALYZE_TIMEOUT_SECONDS", "12"))
 ANALYZE_CACHE_TTL_SECONDS = _env_int("ANALYZE_CACHE_TTL_SECONDS", 900)
 FAST_ANALYSIS_CHAR_LIMIT = _env_int("FAST_ANALYSIS_CHAR_LIMIT", 30)
-FAST_RESPONSE_CACHE_TTL_SECONDS = _env_int("FAST_RESPONSE_CACHE_TTL_SECONDS", 45)
+FAST_RESPONSE_CACHE_TTL_SECONDS = 0 # Disabled cache to show live data
 
 if not MONGO_URI:
     raise RuntimeError("MONGO_URI is required in environment variables.")
 
-db_name_from_uri = urlparse(MONGO_URI).path.lstrip("/")
+db_name_from_uri = urlparse(MONGO_URI).path.lstrip("/").split("?")[0]
 db_name = os.getenv("MONGO_DB_NAME", "").strip() or db_name_from_uri or "mindsync"
 
 _mongo_client: MongoClient | None = None

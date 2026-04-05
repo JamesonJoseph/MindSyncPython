@@ -38,7 +38,9 @@ export default function AddTaskScreen() {
   const [selectedPriority, setSelectedPriority] = useState<Priority>('medium');
   const [selectedDate, setSelectedDate] = useState(() => {
     if (params.date) {
-      return new Date(params.date as string + 'T00:00:00+05:30');
+      // Input is YYYY-MM-DD. Create a local date for that day.
+      const [y, m, d] = (params.date as string).split('-').map(Number);
+      return new Date(y, m - 1, d);
     }
     return getISTNow();
   });
@@ -46,7 +48,8 @@ export default function AddTaskScreen() {
   const [showTimePicker, setShowTimePicker] = useState(false);
   const [pickerMonth, setPickerMonth] = useState(() => {
     if (params.date) {
-      return new Date(params.date as string + 'T00:00:00+05:30');
+      const [y, m, d] = (params.date as string).split('-').map(Number);
+      return new Date(y, m - 1, 1);
     }
     return getISTNow();
   });

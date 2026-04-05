@@ -596,18 +596,24 @@ export default function TaskManagerScreen() {
 
   // Format datetime for display
   const formatDateTime = (isoString: string, allDay: boolean): string => {
-    const date = new Date(isoString);
-    const options: Intl.DateTimeFormatOptions = {
-      weekday: 'short',
-      month: 'short',
-      day: 'numeric',
-      timeZone: 'Asia/Kolkata',
-    };
-    if (!allDay) {
-      options.hour = '2-digit';
-      options.minute = '2-digit';
+    try {
+      const date = new Date(isoString);
+      // Use local formatters to ensure consistency with the picker
+      const options: Intl.DateTimeFormatOptions = {
+        weekday: 'short',
+        month: 'short',
+        day: 'numeric',
+        timeZone: 'Asia/Kolkata',
+      };
+      if (!allDay) {
+        options.hour = '2-digit';
+        options.minute = '2-digit';
+        options.hour12 = true;
+      }
+      return date.toLocaleDateString('en-IN', options);
+    } catch (e) {
+      return isoString;
     }
-    return date.toLocaleDateString('en-US', options);
   };
 
   // Format reminder text
