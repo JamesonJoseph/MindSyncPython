@@ -807,6 +807,30 @@ async def close_clients():
     if _gemini_http_client is not None:
         await _gemini_http_client.aclose()
 
+@app.post("/api/users/push-token")
+async def register_push_token(request: Request):
+    try:
+        auth_info = await _require_auth(request)
+        uid = auth_info.get("uid")
+        payload = await request.json()
+        token = payload.get("token")
+        
+        if not token:
+            return JSONResponse(status_code=400, content={"error": "Token is required"})
+            
+        _, _, _, _, _, _, _, _, _, _ = _get_collections()
+        db = _get_db_instance()
+        users_col = db.users
+        users_col.update_one(
+            {"userId": uid},
+            {"$set": {"pushToken": token, "updatedAt": _utc_now()}},
+            upsert=True
+        )
+        return {"message": "Push token registered successfully"}
+    except Exception as e:
+        print(f"Error registering push token: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
 @app.api_route("/health", methods=["GET", "HEAD"])
 def health_check():
     return {"status": "ok"}

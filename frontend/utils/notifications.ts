@@ -17,6 +17,64 @@ if (!isExpoGo || Platform.OS !== 'android') {
 }
 
 /**
+ * Request notification permissions and get the push token
+ */
+export async function registerForPushNotificationsAsync(): Promise<string | null> {
+  if (!Device.isDevice) {
+    console.log('Push notifications require a physical device');
+    return null;
+  }
+
+  // Skip for Expo Go on Android to avoid crash/errors if it's SDK 53+
+  if (isExpoGo && Platform.OS === 'android') {
+    console.log('Push notifications are not supported in Expo Go on Android (SDK 53+). Use a development build.');
+    return null;
+  }
+
+  try {
+    const { status: existingStatus } = await Notifications.getPermissionsAsync();
+    let finalStatus = existingStatus;
+
+    if (existingStatus !== 'granted') {
+      const { status } = await Notifications.requestPermissionsAsync();
+      finalStatus = status;
+    }
+
+    if (finalStatus !== 'granted') {
+      console.log('Notification permission not granted');
+      return null;
+    }
+
+    // Get the Expo Push Token
+    const projectId = Constants.expoConfig?.extra?.eas?.projectId || Constants.easConfig?.projectId;
+    if (!projectId) {
+      console.warn('EAS Project ID not found in app.json. Push token might fail.');
+    }
+
+    const token = (await Notifications.getExpoPushTokenAsync({
+      projectId,
+    })).data;
+
+    console.log('Expo Push Token:', token);
+
+    // Configure Android notification channel
+    if (Platform.OS === 'android') {
+      await Notifications.setNotificationChannelAsync('task-reminders', {
+        name: 'Task Reminders',
+        importance: Notifications.AndroidImportance.HIGH,
+        vibrationPattern: [0, 250, 250, 250],
+        lightColor: '#00E0C6',
+      });
+    }
+
+    return token;
+  } catch (error) {
+    console.error('Error getting push token:', error);
+    return null;
+  }
+}
+
+/**
  * Request notification permissions
  */
 export async function requestNotificationPermissions(): Promise<boolean> {

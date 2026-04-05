@@ -19,8 +19,9 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect } from 'expo-router';
 import * as Clipboard from 'expo-clipboard';
 import * as DocumentPicker from 'expo-document-picker';
-import * as FileSystem from 'expo-file-system/legacy';
+import * as FileSystem from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
+import Pdf from 'react-native-pdf';
 import { auth } from '../firebaseConfig';
 import { getApiBaseUrl, parseApiResponse } from '../utils/api';
 import { useVault, VaultEntry, VaultEntryType } from './contexts/VaultContext';
@@ -181,23 +182,35 @@ export default function DocsScreen() {
       return null;
     }
 
-    const token = await user.getIdToken(false);
-    const apiUrl = getApiBaseUrl();
-    const safeName = (entry.fileName || `${entry.title}.pdf`).replace(/[^\w.\-]/g, '_');
-    const fileUri = `${FileSystem.cacheDirectory}${safeName}`;
-    const targetUrl = entry.url.startsWith('http')
-      ? entry.url
-      : `${apiUrl}${entry.url.startsWith('/') ? '' : '/'}${entry.url}`;
+    try {
+      const token = await user.getIdToken(false);
+      const apiUrl = getApiBaseUrl();
+      const safeName = (entry.fileName || `${entry.title}.pdf`).replace(/[^\w.\-]/g, '_');
+      const fileUri = `${FileSystem.cacheDirectory}${safeName}`;
+      const targetUrl = entry.url.startsWith('http')
+        ? entry.url
+        : `${apiUrl}${entry.url.startsWith('/') ? '' : '/'}${entry.url}`;
 
-    await FileSystem.downloadAsync(targetUrl, fileUri, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'X-User-Id': user.uid,
-        ...(user.email ? { 'X-User-Email': user.email } : {}),
-      },
-    });
+      console.log('Downloading PDF from:', targetUrl);
+      const downloadRes = await FileSystem.downloadAsync(targetUrl, fileUri, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'X-User-Id': user.uid,
+          ...(user.email ? { 'X-User-Email': user.email } : {}),
+        },
+      });
 
-    return fileUri;
+      if (downloadRes.status !== 200) {
+        console.warn('Download failed with status:', downloadRes.status);
+        Alert.alert('Download Failed', `The server returned error ${downloadRes.status}. It may still be waking up.`);
+        return null;
+      }
+
+      return downloadRes.uri;
+    } catch (error) {
+      console.error('downloadPdfToCache error:', error);
+      throw error;
+    }
   };
 
   const handleViewPdf = async (entry: VaultEntry) => {
@@ -205,12 +218,12 @@ export default function DocsScreen() {
       const fileUri = await downloadPdfToCache(entry);
       if (!fileUri) return;
 
-      const uri = fileUri.startsWith('file://') ? fileUri : `file://${fileUri}`;
-      setPdfUrl(uri);
+      // react-native-pdf likes direct URIs from FileSystem.downloadAsync
+      setPdfUrl(fileUri);
       setShowPdfModal(true);
     } catch (error) {
       console.warn('View PDF failed', error);
-      Alert.alert('Open Failed', 'Could not open this PDF on the device.');
+      Alert.alert('Open Failed', 'Could not open this PDF on the device. Please try again in a few moments.');
     }
   };
 
@@ -510,12 +523,19 @@ export default function DocsScreen() {
                 <Ionicons name="close" size={28} color="#333" />
               </TouchableOpacity>
             </View>
-            <WebView
-              source={{ uri: pdfUrl }}
-              style={styles.pdfWebView}
-              startInLoadingState={true}
-              scalesPageToFit={true}
-            />
+            <View style={{ flex: 1, backgroundColor: '#f0f0f0' }}>
+              <Pdf
+                source={{ uri: pdfUrl, cache: true }}
+                onLoadComplete={(numberOfPages) => {
+                  console.log(`Number of pages: ${numberOfPages}`);
+                }}
+                onError={(error) => {
+                  console.warn('Pdf view error:', error);
+                  Alert.alert('PDF Error', 'Failed to display PDF. It might be corrupted or still downloading.');
+                }}
+                style={{ flex: 1, width: '100%', height: '100%' }}
+              />
+            </View>
           </View>
         </View>
       </Modal>
