@@ -21,7 +21,11 @@
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
       "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS"
+      ]
     },
     "web": {
       "output": "static",
@@ -63,6 +67,13 @@
     "assetBundlePatterns": [
       "app/assets/avatar/*",
       "assets/avatar/*"
-    ]
+    ],
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "b2a9a2e4-3ff5-44a3-9e32-f732bced82f6"
+      }
+    },
+    "owner": "jamesonjoseph"
   }
 }
