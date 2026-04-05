@@ -755,7 +755,7 @@ async def close_clients():
     if _gemini_http_client is not None:
         await _gemini_http_client.aclose()
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 def health_check():
     return {"status": "ok"}
 
