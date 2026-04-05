@@ -58,7 +58,7 @@ The application integrates multiple everyday tools such as **journaling, task ma
 - React Native Expo
 
 ### Backend
-- 
+- Python FastAPI
 
 ### Database
 - MongoDB
