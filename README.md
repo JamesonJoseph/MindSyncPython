@@ -8,7 +8,7 @@ The application integrates multiple everyday tools such as **journaling, task ma
 
 ## 🚀 Features
 
-### 🤖 AI Avatar Assistant (NEW)
+### 🤖 AI Avatar Assistant
 - Interactive **AI Avatar** users can talk with
 - Supports **Speech-to-Text (STT)** for voice input
 - Uses **Text-to-Speech (TTS)** for voice responses
@@ -43,14 +43,6 @@ The application integrates multiple everyday tools such as **journaling, task ma
 - Create, edit, and delete tasks
 - Set reminders for important activities
 - Receive notifications before deadlines
-
----
-
-### 💰 Budget Management
-- Reads **bank transaction SMS messages**
-- Detects credit and debit transactions
-- Automatically updates balance
-- Alerts when the balance becomes lower than the average
 
 ---
 
