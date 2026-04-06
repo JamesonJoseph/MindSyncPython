@@ -110,12 +110,9 @@ function parseTimeStr(timeStr: string): { hours: number; minutes: number } {
  */
 export function toISTISOString(dateStr: string, timeStr?: string): string {
   try {
-    // Parse the date parts
-    const dateParts = dateStr.split('-').map(p => parseInt(p, 10));
-    const year = dateParts[0] || new Date().getFullYear();
-    const month = dateParts[1] || 1;
-    const day = dateParts[2] || 1;
-
+    // Input dateStr is YYYY-MM-DD
+    // Input timeStr is HH:MM or HH:MM AM/PM
+    
     let hours = 0;
     let minutes = 0;
 
@@ -125,14 +122,13 @@ export function toISTISOString(dateStr: string, timeStr?: string): string {
       minutes = parsed.minutes;
     }
 
-    // Construct a timestamp as if the input parts were UTC
-    const dateAsIfUtc = Date.UTC(year, month - 1, day, hours, minutes, 0);
+    // Create a ISO string with the IST offset (+05:30)
+    // Format: YYYY-MM-DDTHH:mm:ss+05:30
+    const isoString = `${dateStr}T${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:00+05:30`;
     
-    // Since input was IST (UTC+5:30), we must subtract 5.5 hours to get true UTC
-    const istOffsetMs = 5.5 * 60 * 60 * 1000;
-    const trueUtcDate = new Date(dateAsIfUtc - istOffsetMs);
-
-    return trueUtcDate.toISOString();
+    // Create a Date object from this string - the system will handle the UTC conversion correctly
+    const date = new Date(isoString);
+    return date.toISOString();
   } catch (error) {
     console.error('Error in toISTISOString:', error, { dateStr, timeStr });
     return new Date().toISOString();

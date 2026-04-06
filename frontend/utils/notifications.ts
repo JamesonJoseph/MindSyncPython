@@ -146,6 +146,21 @@ export async function scheduleNotification(
     }
 
     const channelId = Platform.OS === 'android' ? 'default' : undefined;
+    const now = new Date();
+    const diffMs = triggerDate.getTime() - now.getTime();
+    
+    let trigger: Notifications.NotificationTriggerInput;
+    
+    if (diffMs <= 0) {
+      // If it's in the past, fire in 1 second
+      trigger = { seconds: 1 };
+    } else if (diffMs < 10000) {
+      // If it's within 10 seconds, use relative seconds trigger for better reliability
+      trigger = { seconds: Math.max(1, Math.floor(diffMs / 1000)) };
+    } else {
+      // Standard date trigger
+      trigger = { date: triggerDate };
+    }
 
     const notificationId = await Notifications.scheduleNotificationAsync({
       content: {
@@ -159,7 +174,7 @@ export async function scheduleNotification(
         priority: Notifications.AndroidNotificationPriority.MAX,
         ...(channelId && { channelId }),
       },
-      trigger: triggerDate,
+      trigger,
     });
 
     console.log(`Notification scheduled: ${notificationId} for ${triggerDate.toLocaleString()}`);

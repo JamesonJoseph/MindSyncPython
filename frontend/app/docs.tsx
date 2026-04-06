@@ -192,6 +192,11 @@ export default function DocsScreen() {
         ? entry.url
         : `${apiUrl}${entry.url.startsWith('/') ? '' : '/'}${entry.url}`;
 
+      console.log('[PDF] Waking up server...');
+      // Use authFetch to wait for the server to wake up (it has a 60s timeout)
+      const { authFetch: pingFetch } = await import('../utils/api');
+      await pingFetch('/health');
+
       console.log('[PDF] Downloading from:', targetUrl);
       
       const downloadRes = await FileSystem.downloadAsync(targetUrl, fileUri, {
