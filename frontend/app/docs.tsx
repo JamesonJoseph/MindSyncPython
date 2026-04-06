@@ -19,7 +19,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect } from 'expo-router';
 import * as Clipboard from 'expo-clipboard';
 import * as DocumentPicker from 'expo-document-picker';
-import { File, Directory } from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 import Pdf from 'react-native-pdf';
 import { auth } from '../firebaseConfig';
@@ -187,40 +187,29 @@ export default function DocsScreen() {
       const apiUrl = getApiBaseUrl();
       const safeName = (entry.fileName || `${entry.title}.pdf`).replace(/[^\w.\-]/g, '_');
       
-      const file = new File(Directory.cache, safeName);
+      const fileUri = `${FileSystem.cacheDirectory}${safeName}`;
       const targetUrl = entry.url.startsWith('http')
         ? entry.url
         : `${apiUrl}${entry.url.startsWith('/') ? '' : '/'}${entry.url}`;
 
       console.log('[PDF] Downloading from:', targetUrl);
-      console.log('[PDF] Saving to:', file.uri);
       
-      try {
-        await file.downloadAsync(targetUrl, {
-          headers: {
-            Authorization: `Bearer ${token}`,
-            'X-User-Id': user.uid,
-            ...(user.email ? { 'X-User-Email': user.email } : {}),
-          },
-        });
-        return file.uri;
-      } catch (downloadErr: any) {
-        console.error('[PDF] file.downloadAsync failed:', downloadErr);
-        // Fallback to legacy method if the new API fails on this specific device/version
-        console.log('[PDF] Attempting legacy fallback...');
-        const legacyFS = await import('expo-file-system/legacy');
-        const legacyPath = `${legacyFS.cacheDirectory}${safeName}`;
-        const res = await legacyFS.downloadAsync(targetUrl, legacyPath, {
-          headers: {
-            Authorization: `Bearer ${token}`,
-            'X-User-Id': user.uid,
-          }
-        });
-        return res.uri;
+      const downloadRes = await FileSystem.downloadAsync(targetUrl, fileUri, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'X-User-Id': user.uid,
+          ...(user.email ? { 'X-User-Email': user.email } : {}),
+        },
+      });
+
+      if (!downloadRes || downloadRes.status !== 200) {
+        throw new Error(`Server returned status ${downloadRes?.status || 'unknown'}`);
       }
+
+      return downloadRes.uri;
     } catch (error: any) {
-      console.error('[PDF] downloadPdfToCache fatal error:', error);
-      Alert.alert('Download Failed', `Error: ${error.message || 'Unknown error'}. It may still be waking up.`);
+      console.error('[PDF] downloadPdfToCache error:', error);
+      Alert.alert('Download Failed', `The server could not provide the file (Error: ${error.message || 'Network error'}). It may still be waking up.`);
       return null;
     }
   };

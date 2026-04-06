@@ -159,10 +159,7 @@ export async function scheduleNotification(
         priority: Notifications.AndroidNotificationPriority.MAX,
         ...(channelId && { channelId }),
       },
-      trigger: {
-        date: triggerDate,
-        channelId: channelId,
-      } as any,
+      trigger: triggerDate,
     });
 
     console.log(`Notification scheduled: ${notificationId} for ${triggerDate.toLocaleString()}`);

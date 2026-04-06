@@ -63,7 +63,9 @@ if not MONGO_URI:
     raise RuntimeError("MONGO_URI is required in environment variables.")
 
 db_name_from_uri = urlparse(MONGO_URI).path.lstrip("/").split("?")[0]
-db_name = os.getenv("MONGO_DB_NAME", "").strip() or db_name_from_uri or "mindsync"
+db_name = os.getenv("MONGO_DB_NAME", "").strip() or db_name_from_uri or "mindsync-database"
+
+print(f"[mongo] Connecting to database: {db_name}")
 
 _mongo_client: MongoClient | None = None
 _mongo_error: str | None = None
